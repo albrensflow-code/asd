@@ -7,15 +7,23 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -53,6 +61,16 @@ import androidx.camera.extensions.ExtensionMode;
 import androidx.camera.extensions.ExtensionsManager;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
+import androidx.camera.video.FallbackStrategy;
+import androidx.camera.video.MediaStoreOutputOptions;
+import androidx.camera.video.PendingRecording;
+import androidx.camera.video.Quality;
+import androidx.camera.video.QualitySelector;
+import androidx.camera.video.Recorder;
+import androidx.camera.video.Recording;
+import androidx.camera.video.VideoCapabilities;
+import androidx.camera.video.VideoCapture;
+import androidx.camera.video.VideoRecordEvent;
 import androidx.core.content.ContextCompat;
 
 import com.google.common.util.concurrent.ListenableFuture;
@@ -63,6 +81,9 @@ import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends ComponentActivity {
@@ -70,6 +91,7 @@ public class MainActivity extends ComponentActivity {
     private static final int MODE_HDR = 1;
     private static final int MODE_NIGHT = 2;
     private static final int MODE_PORTRAIT = 3;
+    private static final int MODE_VIDEO = 4;
 
     private static final int FLASH_AUTO = 0;
     private static final int FLASH_ON = 1;
@@ -83,16 +105,32 @@ public class MainActivity extends ComponentActivity {
     private TextView focusHint;
     private TextView flashButton;
     private TextView lensButton;
+    private TextView timerButton;
+    private TextView gridButton;
     private FrameLayout shutterButton;
+    private View shutterCore;
+    private GridOverlay gridOverlay;
     private LinearLayout zoomRow;
     private LinearLayout modeRow;
 
     private ImageCapture imageCapture;
+    private VideoCapture<Recorder> videoCapture;
+    private Recording activeRecording;
+    private boolean torchOn = false;
     private ProcessCameraProvider cameraProvider;
     private ExtensionsManager extensionsManager;
     private Camera camera;
     private CameraManager cameraManager;
     private ActivityResultLauncher<String> cameraPermissionLauncher;
+    private ActivityResultLauncher<String> audioPermissionLauncher;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService colorWorker = Executors.newSingleThreadExecutor();
+    private int timerIndex = 0;
+    private final int[] timerValues = {0, 3, 5, 10};
+    private boolean countdownActive = false;
+    private boolean gridEnabled = false;
+    private SensorManager sensorManager;
+    private Sensor rotationSensor;
 
     private final List<String> backCameraIds = new ArrayList<>();
     private final List<String> frontCameraIds = new ArrayList<>();
@@ -119,6 +157,8 @@ public class MainActivity extends ComponentActivity {
         getWindow().getDecorView().setSystemUiVisibility(0);
 
         cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        sensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        if (sensorManager != null) rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
         cameraPermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(),
                 granted -> {
@@ -128,6 +168,9 @@ public class MainActivity extends ComponentActivity {
                         Toast.makeText(this, "إذن الكاميرا مطلوب", Toast.LENGTH_LONG).show();
                     }
                 });
+        audioPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(),
+                granted -> beginVideoRecording(granted));
 
         setContentView(createScreen());
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -158,13 +201,31 @@ public class MainActivity extends ComponentActivity {
         brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         header.addView(brand, new LinearLayout.LayoutParams(0, dp(44), 1f));
 
-        flashButton = iconButton("⚡ AUTO", 70);
-        flashButton.setOnClickListener(v -> cycleFlash());
-        header.addView(flashButton);
+        timerButton = iconButton("⏱ OFF", 58);
+        timerButton.setOnClickListener(v -> cycleTimer());
+        header.addView(timerButton, new LinearLayout.LayoutParams(dp(58), dp(44)));
 
-        TextView settingsButton = iconButton("⚙", 48);
-        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(48), dp(44));
-        settingsParams.leftMargin = dp(7);
+        gridButton = iconButton("▦", 42);
+        gridButton.setOnClickListener(v -> toggleGrid());
+        LinearLayout.LayoutParams gridButtonParams = new LinearLayout.LayoutParams(dp(42), dp(44));
+        gridButtonParams.leftMargin = dp(5);
+        header.addView(gridButton, gridButtonParams);
+
+        flashButton = iconButton("⚡ AUTO", 68);
+        flashButton.setOnClickListener(v -> cycleFlash());
+        LinearLayout.LayoutParams flashParams = new LinearLayout.LayoutParams(dp(68), dp(44));
+        flashParams.leftMargin = dp(5);
+        header.addView(flashButton, flashParams);
+
+        TextView colorButton = iconButton("🎨", 42);
+        LinearLayout.LayoutParams colorParams = new LinearLayout.LayoutParams(dp(42), dp(44));
+        colorParams.leftMargin = dp(5);
+        header.addView(colorButton, colorParams);
+        colorButton.setOnClickListener(v -> openColorLab());
+
+        TextView settingsButton = iconButton("⚙", 42);
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(42), dp(44));
+        settingsParams.leftMargin = dp(5);
         header.addView(settingsButton, settingsParams);
         settingsButton.setOnClickListener(v -> showProSettings());
 
@@ -179,6 +240,11 @@ public class MainActivity extends ComponentActivity {
         previewView.setScaleType(PreviewView.ScaleType.FILL_CENTER);
         previewFrame.addView(previewView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        gridOverlay = new GridOverlay(this);
+        previewFrame.addView(gridOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        gridOverlay.setVisibility(View.GONE);
 
         previewBadge = overlayLabel("AUTO  •  PHOTO", 12);
         FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
@@ -227,6 +293,7 @@ public class MainActivity extends ComponentActivity {
         addModeButton("HDR", MODE_HDR);
         addModeButton("ليل", MODE_NIGHT);
         addModeButton("بورتريه", MODE_PORTRAIT);
+        addModeButton("فيديو", MODE_VIDEO);
         updateModeButtons();
 
         LinearLayout captureRow = new LinearLayout(this);
@@ -283,7 +350,7 @@ public class MainActivity extends ComponentActivity {
         FrameLayout.LayoutParams innerParams = new FrameLayout.LayoutParams(dp(66), dp(66), Gravity.CENTER);
         outer.addView(inner, innerParams);
 
-        outer.setOnClickListener(v -> capturePhoto());
+        outer.setOnClickListener(v -> onShutterPressed());
         outer.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) v.setScaleX(0.94f);
             if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
@@ -361,7 +428,7 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void updateModeButtons() {
-        int[] modes = {MODE_PHOTO, MODE_HDR, MODE_NIGHT, MODE_PORTRAIT};
+        int[] modes = {MODE_PHOTO, MODE_HDR, MODE_NIGHT, MODE_PORTRAIT, MODE_VIDEO};
         for (int i = 0; i < modeButtons.size(); i++) {
             boolean selected = modes[i] == activeMode;
             Button button = modeButtons.get(i);
@@ -378,6 +445,7 @@ public class MainActivity extends ComponentActivity {
         if (mode == MODE_HDR) return "HDR";
         if (mode == MODE_NIGHT) return "ليل";
         if (mode == MODE_PORTRAIT) return "بورتريه";
+        if (mode == MODE_VIDEO) return "فيديو";
         return "صورة";
     }
 
@@ -476,7 +544,7 @@ public class MainActivity extends ComponentActivity {
             CameraSelector baseSelector = baseCameraSelector();
             CameraSelector finalSelector = baseSelector;
 
-            if (!isFrontCamera && activeMode != MODE_PHOTO && extensionsManager != null) {
+            if (!isFrontCamera && activeMode != MODE_PHOTO && activeMode != MODE_VIDEO && extensionsManager != null) {
                 int ext = extensionMode(activeMode);
                 if (extensionsManager.isExtensionAvailable(baseSelector, ext)) {
                     finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ext);
@@ -485,7 +553,7 @@ public class MainActivity extends ComponentActivity {
                     updateModeButtons();
                     Toast.makeText(this, "هذا الوضع غير مدعوم من تعريف الكاميرا؛ رجعنا للوضع العادي.", Toast.LENGTH_LONG).show();
                 }
-            } else if (activeMode != MODE_PHOTO) {
+            } else if (activeMode != MODE_PHOTO && activeMode != MODE_VIDEO) {
                 activeMode = MODE_PHOTO;
                 updateModeButtons();
             }
@@ -493,17 +561,36 @@ public class MainActivity extends ComponentActivity {
             Preview preview = new Preview.Builder().build();
             preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
-            imageCapture = new ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                    .setJpegQuality(100)
-                    .build();
-
             cameraProvider.unbindAll();
-            camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+            if (activeMode == MODE_VIDEO) {
+                CameraInfo info = selectedCameraInfo();
+                Recorder.Builder recorderBuilder = new Recorder.Builder()
+                        .setQualitySelector(QualitySelector.from(Quality.FHD,
+                                FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)));
+                Recorder recorder = recorderBuilder.build();
+                boolean stabilization = false;
+                if (info != null) {
+                    try { stabilization = Recorder.getVideoCapabilities(info).isStabilizationSupported(); }
+                    catch (Exception ignored) { }
+                }
+                videoCapture = new VideoCapture.Builder<>(recorder)
+                        .setVideoStabilizationEnabled(stabilization)
+                        .build();
+                imageCapture = null;
+                camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, videoCapture);
+            } else {
+                videoCapture = null;
+                imageCapture = new ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        .setJpegQuality(100)
+                        .build();
+                camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+            }
 
             flashAvailable = camera.getCameraInfo().hasFlashUnit() && !isFrontCamera;
             flashButton.setEnabled(flashAvailable);
             flashButton.setAlpha(flashAvailable ? 1f : 0.45f);
+            torchOn = false;
             updateFlashLabel();
             exposureCompensationIndex = camera.getCameraInfo().getExposureState()
                     .getExposureCompensationIndex();
@@ -518,6 +605,18 @@ public class MainActivity extends ComponentActivity {
             setCaptureEnabled(false);
             setStatus("لم تعمل هذه العدسة/الميزة: " + safeMessage(error));
         }
+    }
+
+    private CameraInfo selectedCameraInfo() {
+        if (cameraProvider == null) return null;
+        for (CameraInfo info : cameraProvider.getAvailableCameraInfos()) {
+            try {
+                String id = Camera2CameraInfo.from(info).getCameraId();
+                String wanted = isFrontCamera ? (frontCameraIds.isEmpty() ? null : frontCameraIds.get(0)) : selectedBackCameraId;
+                if (wanted != null && wanted.equals(id)) return info;
+            } catch (Exception ignored) { }
+        }
+        return cameraProvider.getAvailableCameraInfos().isEmpty() ? null : cameraProvider.getAvailableCameraInfos().get(0);
     }
 
     private String describeSelectedLens() {
@@ -630,7 +729,14 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void cycleFlash() {
-        if (!flashAvailable || imageCapture == null) return;
+        if (!flashAvailable || camera == null) return;
+        if (activeMode == MODE_VIDEO) {
+            torchOn = !torchOn;
+            camera.getCameraControl().enableTorch(torchOn);
+            flashButton.setText(torchOn ? "☼ LIGHT ON" : "☼ LIGHT OFF");
+            return;
+        }
+        if (imageCapture == null) return;
         flashMode = (flashMode + 1) % 3;
         imageCapture.setFlashMode(flashMode == FLASH_AUTO ? ImageCapture.FLASH_MODE_AUTO
                 : flashMode == FLASH_ON ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
@@ -639,10 +745,15 @@ public class MainActivity extends ComponentActivity {
 
     private void updateFlashLabel() {
         if (flashButton == null) return;
+        if (activeMode == MODE_VIDEO) {
+            flashButton.setText(torchOn ? "☼ LIGHT ON" : "☼ LIGHT OFF");
+            return;
+        }
         String label = flashMode == FLASH_AUTO ? "⚡ AUTO"
                 : flashMode == FLASH_ON ? "⚡ ON" : "⚡ OFF";
         flashButton.setText(label);
     }
+
 
     private void focusAt(float x, float y) {
         if (camera == null || previewView == null) return;
@@ -658,11 +769,68 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
+    private void onShutterPressed() {
+        if (activeMode == MODE_VIDEO) {
+            toggleVideoRecording();
+        } else {
+            capturePhoto();
+        }
+    }
+
+    private void cycleTimer() {
+        timerIndex = (timerIndex + 1) % timerValues.length;
+        int seconds = timerValues[timerIndex];
+        timerButton.setText(seconds == 0 ? "⏱ OFF" : "⏱ " + seconds + "s");
+    }
+
+    private void toggleGrid() {
+        gridEnabled = !gridEnabled;
+        if (gridOverlay != null) {
+            gridOverlay.setGridVisible(gridEnabled);
+            gridOverlay.setVisibility(gridEnabled ? View.VISIBLE : View.GONE);
+        }
+        if (gridButton != null) gridButton.setText(gridEnabled ? "▦ ON" : "▦");
+    }
+
+    private void openColorLab() {
+        if (lastPhotoUri == null) {
+            Toast.makeText(this, "التقط صورة أولًا حتى تفتح استوديو الألوان.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        PhotoColorLab.show(this, lastPhotoUri, colorWorker, edited -> {
+            lastPhotoUri = edited;
+            setStatus("تم حفظ نسخة الألوان المعدّلة.");
+        });
+    }
+
     private void capturePhoto() {
         if (imageCapture == null || camera == null) {
             Toast.makeText(this, "انتظر حتى تجهز الكاميرا.", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (countdownActive) return;
+        int seconds = timerValues[timerIndex];
+        if (seconds > 0) {
+            countdownActive = true;
+            setCaptureEnabled(false);
+            runCountdown(seconds);
+            return;
+        }
+        performPhotoCapture();
+    }
+
+    private void runCountdown(int remaining) {
+        if (remaining <= 0) {
+            countdownActive = false;
+            performPhotoCapture();
+            return;
+        }
+        setStatus("التصوير بعد " + remaining + "...");
+        mainHandler.postDelayed(() -> runCountdown(remaining - 1), 1000);
+    }
+
+    private void performPhotoCapture() {
+        if (imageCapture == null) { setCaptureEnabled(true); return; }
         setCaptureEnabled(false);
         String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         ContentValues values = new ContentValues();
@@ -691,6 +859,77 @@ public class MainActivity extends ComponentActivity {
                         Toast.makeText(MainActivity.this, "تعذر التقاط الصورة", Toast.LENGTH_SHORT).show();
                     }
                 });
+    }
+
+    private void toggleVideoRecording() {
+        if (activeRecording != null) {
+            activeRecording.stop();
+            setStatus("جارٍ إنهاء وحفظ الفيديو...");
+            return;
+        }
+        if (videoCapture == null) {
+            Toast.makeText(this, "وضع الفيديو غير جاهز على هذه العدسة.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            beginVideoRecording(true);
+        } else {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
+        }
+    }
+
+    private void beginVideoRecording(boolean withAudio) {
+        if (videoCapture == null) return;
+        try {
+            String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Video.Media.DISPLAY_NAME, "RedmiVideo_" + stamp + ".mp4");
+            values.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+            values.put(MediaStore.Video.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_MOVIES + "/RedmiCamera");
+            MediaStoreOutputOptions output = new MediaStoreOutputOptions.Builder(
+                    getContentResolver(), MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+                    .setContentValues(values).build();
+            PendingRecording pending = videoCapture.getOutput().prepareRecording(this, output);
+            if (withAudio) pending = pending.withAudioEnabled(false);
+            else Toast.makeText(this, "سيتم تسجيل الفيديو دون صوت لأن إذن الميكروفون غير متاح.", Toast.LENGTH_LONG).show();
+
+            activeRecording = pending.start(ContextCompat.getMainExecutor(this), event -> {
+                if (event instanceof VideoRecordEvent.Start) {
+                    setStatus(withAudio ? "● تسجيل فيديو مع الصوت... اضغط لإيقافه" : "● تسجيل فيديو صامت... اضغط لإيقافه");
+                    setShutterRecordingVisual(true);
+                } else if (event instanceof VideoRecordEvent.Status) {
+                    long nanos = event.getRecordingStats().getRecordedDurationNanos();
+                    long seconds = java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(nanos);
+                    setStatus(String.format(Locale.US, "● تسجيل %02d:%02d", seconds / 60, seconds % 60));
+                } else if (event instanceof VideoRecordEvent.Finalize) {
+                    VideoRecordEvent.Finalize finalize = (VideoRecordEvent.Finalize) event;
+                    activeRecording = null;
+                    setShutterRecordingVisual(false);
+                    if (finalize.hasError()) {
+                        setStatus("تعذر حفظ الفيديو. رمز الخطأ: " + finalize.getError());
+                        Toast.makeText(this, "فشل تسجيل الفيديو", Toast.LENGTH_LONG).show();
+                    } else {
+                        setStatus("تم حفظ الفيديو في Movies/RedmiCamera");
+                        Toast.makeText(this, "تم حفظ الفيديو بنجاح", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+        } catch (Exception error) {
+            activeRecording = null;
+            setShutterRecordingVisual(false);
+            setStatus("تعذر بدء الفيديو: " + safeMessage(error));
+        }
+    }
+
+    private void setShutterRecordingVisual(boolean recording) {
+        if (shutterCore != null) {
+            GradientDrawable core = new GradientDrawable();
+            core.setShape(GradientDrawable.OVAL);
+            core.setColor(recording ? Color.rgb(235, 55, 55) : Color.rgb(248, 248, 246));
+            shutterCore.setBackground(core);
+        }
     }
 
     private void openGallery() {
@@ -1049,8 +1288,69 @@ public class MainActivity extends ComponentActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (sensorManager != null && rotationSensor != null) {
+            sensorManager.registerListener(levelListener, rotationSensor, SensorManager.SENSOR_DELAY_UI);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (sensorManager != null) sensorManager.unregisterListener(levelListener);
+        if (activeRecording != null) activeRecording.stop();
+        super.onPause();
+    }
+
+    private final SensorEventListener levelListener = new SensorEventListener() {
+        private final float[] rotation = new float[9];
+        private final float[] orientation = new float[3];
+        @Override public void onSensorChanged(SensorEvent event) {
+            if (event.sensor.getType() != Sensor.TYPE_ROTATION_VECTOR || gridOverlay == null) return;
+            SensorManager.getRotationMatrixFromVector(rotation, event.values);
+            SensorManager.getOrientation(rotation, orientation);
+            gridOverlay.setRollDegrees((float) Math.toDegrees(orientation[2]));
+        }
+        @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+    };
+
+    private static final class GridOverlay extends View {
+        private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint levelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private boolean gridVisible = true;
+        private float rollDegrees = 0f;
+        GridOverlay(Context context) {
+            super(context);
+            setWillNotDraw(false);
+            setClickable(false);
+            gridPaint.setColor(0x99FFFFFF);
+            gridPaint.setStrokeWidth(1.2f);
+            gridPaint.setStyle(Paint.Style.STROKE);
+            levelPaint.setStrokeWidth(4f);
+            levelPaint.setStrokeCap(Paint.Cap.ROUND);
+        }
+        void setGridVisible(boolean visible) { gridVisible = visible; invalidate(); }
+        void setRollDegrees(float degrees) { rollDegrees = degrees; if (gridVisible) invalidate(); }
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (!gridVisible) return;
+            float w = getWidth(), h = getHeight();
+            canvas.drawLine(w / 3f, 0, w / 3f, h, gridPaint);
+            canvas.drawLine(w * 2f / 3f, 0, w * 2f / 3f, h, gridPaint);
+            canvas.drawLine(0, h / 3f, w, h / 3f, gridPaint);
+            canvas.drawLine(0, h * 2f / 3f, w, h * 2f / 3f, gridPaint);
+            levelPaint.setColor(Math.abs(rollDegrees) < 1.2f ? 0xFF40E07A : 0xFFFFC24A);
+            canvas.save();
+            canvas.rotate(-rollDegrees, w / 2f, h / 2f);
+            canvas.drawLine(w * 0.40f, h / 2f, w * 0.60f, h / 2f, levelPaint);
+            canvas.restore();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         if (cameraProvider != null) cameraProvider.unbindAll();
+        colorWorker.shutdown();
         super.onDestroy();
     }
 }
