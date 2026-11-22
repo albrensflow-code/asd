@@ -1259,7 +1259,7 @@ public class MainActivity extends ComponentActivity {
                 future.addListener(() -> {
                     try { future.get(); }
                     catch (Exception error) { setStatus("لم يقبل الهاتف قيمة تعويض الإضاءة هذه."); }
-                }, ContextCompat.getMainExecutor(this));
+                }, ContextCompat.getMainExecutor(MainActivity.this));
             }
         });
 
