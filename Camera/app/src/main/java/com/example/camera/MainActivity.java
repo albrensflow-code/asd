@@ -48,7 +48,6 @@ import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.Preview;
-import androidx.camera.core.ProcessCameraProvider;
 import androidx.camera.core.ZoomState;
 import androidx.camera.extensions.ExtensionMode;
 import androidx.camera.extensions.ExtensionsManager;
@@ -525,7 +524,7 @@ public class MainActivity extends ComponentActivity {
         if (selectedBackCameraId == null || cameraManager == null) return "خلفية";
         try {
             CameraCharacteristics c = cameraManager.getCameraCharacteristics(selectedBackCameraId);
-            float[] focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_LENGTHS);
+            float[] focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
             if (focal != null && focal.length > 0) return String.format(Locale.US, "خلفية %.1fmm", focal[0]);
         } catch (Exception ignored) {
         }
