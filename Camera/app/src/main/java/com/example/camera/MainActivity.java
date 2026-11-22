@@ -1001,7 +1001,7 @@ public class MainActivity extends ComponentActivity {
                 String direction = facing != null && facing == CameraCharacteristics.LENS_FACING_BACK
                         ? "خلفية" : facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT
                         ? "أمامية" : "غير معروف";
-                float[] focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_LENGTHS);
+                float[] focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
                 report.append("كاميرا ID ").append(id).append(" • ").append(direction).append('\n');
                 if (focal != null) report.append("البعد البؤري: ").append(Arrays.toString(focal)).append(" mm\n");
                 java.util.Set<String> physical = c.getPhysicalCameraIds();
