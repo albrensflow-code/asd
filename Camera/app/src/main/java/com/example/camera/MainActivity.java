@@ -753,6 +753,7 @@ public class MainActivity extends ComponentActivity {
             Toast.makeText(this, "أوقف تسجيل الفيديو أولًا.", Toast.LENGTH_SHORT).show();
             return;
         }
+        boolean needsRebind = activeMode != MODE_PHOTO;
         activeMode = MODE_PHOTO;
         flashMode = FLASH_AUTO;
         torchOn = false;
@@ -776,7 +777,7 @@ public class MainActivity extends ComponentActivity {
         flashButton.setText("AUTO");
         setStatus("AUTO • تركيز وتعريض وألوان تلقائية");
         Toast.makeText(this, "رجعت كل إعدادات التصوير إلى AUTO", Toast.LENGTH_SHORT).show();
-        if (activeMode != MODE_PHOTO) startCamera();
+        if (needsRebind) startCamera();
     }
 
     private void cycleFlash() {
