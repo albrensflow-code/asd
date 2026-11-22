@@ -35,6 +35,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -323,10 +324,7 @@ public class MainActivity extends ComponentActivity {
         LinearLayout.LayoutParams shutterParams = new LinearLayout.LayoutParams(0, dp(88), 1f);
         captureRow.addView(shutterHolder, shutterParams);
 
-        TextView switchButton = iconButton("↻", 52);
-        switchButton.setTextSize(34);
-        switchButton.setTextColor(Color.rgb(242, 244, 247));
-        switchButton.setContentDescription("تبديل الكاميرا الأمامية والخلفية");
+        ImageView switchButton = iconImage(R.drawable.ic_switch_camera, "تبديل الكاميرا الأمامية والخلفية");
         switchButton.setOnClickListener(v -> switchCamera());
         captureRow.addView(switchButton, new LinearLayout.LayoutParams(dp(64), dp(64)));
 
@@ -391,6 +389,18 @@ public class MainActivity extends ComponentActivity {
         view.setFocusable(true);
         view.setShadowLayer(1.5f, 0f, 1f, 0x77000000);
         return view;
+    }
+
+    private ImageView iconImage(int drawableId, String description) {
+        ImageView image = new ImageView(this);
+        image.setImageResource(drawableId);
+        image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        image.setPadding(dp(10), dp(10), dp(10), dp(10));
+        image.setBackgroundColor(Color.TRANSPARENT);
+        image.setContentDescription(description);
+        image.setClickable(true);
+        image.setFocusable(true);
+        return image;
     }
 
     private TextView overlayLabel(String label, int size) {
@@ -608,8 +618,8 @@ public class MainActivity extends ComponentActivity {
             }
 
             flashAvailable = camera.getCameraInfo().hasFlashUnit() && !isFrontCamera;
-            flashButton.setEnabled(flashAvailable);
-            flashButton.setAlpha(flashAvailable ? 1f : 0.45f);
+            flashButton.setEnabled(true);
+            flashButton.setAlpha(1f);
             torchOn = false;
             updateFlashLabel();
             exposureCompensationIndex = camera.getCameraInfo().getExposureState()
