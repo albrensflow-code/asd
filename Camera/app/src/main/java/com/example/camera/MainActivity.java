@@ -237,11 +237,11 @@ public class MainActivity extends ComponentActivity {
         gridButtonParams.leftMargin = dp(3);
         header.addView(gridButton, gridButtonParams);
 
-        flashButton = iconButton("FLASH", 52);
-        flashButton.setTextSize(10);
+        flashButton = iconButton("FLASH", 62);
+        flashButton.setTextSize(9);
         flashButton.setTextColor(Color.rgb(230, 190, 102));
         flashButton.setOnClickListener(v -> cycleFlash());
-        LinearLayout.LayoutParams flashParams = new LinearLayout.LayoutParams(dp(52), dp(44));
+        LinearLayout.LayoutParams flashParams = new LinearLayout.LayoutParams(dp(62), dp(44));
         flashParams.leftMargin = dp(3);
         header.addView(flashButton, flashParams);
 
@@ -369,10 +369,10 @@ public class MainActivity extends ComponentActivity {
         statusText.setTextColor(Color.rgb(165, 173, 185));
         statusText.setTextSize(10);
         statusText.setGravity(Gravity.CENTER);
-        statusText.setSingleLine(true);
+        statusText.setMaxLines(2);
         statusText.setEllipsize(android.text.TextUtils.TruncateAt.END);
         root.addView(statusText, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(21)));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(29)));
 
         return root;
     }
@@ -942,8 +942,8 @@ public class MainActivity extends ComponentActivity {
         if (activeMode == MODE_VIDEO) {
             flashButton.setText(torchOn ? "LIGHT ON" : "LIGHT OFF");
         } else {
-            flashButton.setText(flashMode == FLASH_AUTO ? "FLASH AUTO"
-                    : flashMode == FLASH_ON ? "FLASH ON" : "FLASH OFF");
+            flashButton.setText(flashMode == FLASH_AUTO ? "AUTO"
+                    : flashMode == FLASH_ON ? "ON" : "OFF");
         }
     }
 
@@ -960,7 +960,14 @@ public class MainActivity extends ComponentActivity {
             future.addListener(() -> {
                 try {
                     Object result = future.get();
-                    if (focusHint != null) focusHint.setText("تم ضبط التركيز والتعريض");
+                    if (focusHint != null) {
+                        if (result instanceof androidx.camera.core.FocusMeteringResult
+                                && !((androidx.camera.core.FocusMeteringResult) result).isFocusSuccessful()) {
+                            focusHint.setText("تم قياس التعريض؛ تعذّر تأكيد التركيز");
+                        } else {
+                            focusHint.setText("تم ضبط التركيز والتعريض");
+                        }
+                    }
                 } catch (Exception error) {
                     if (focusHint != null) focusHint.setText("لم يستجب التركيز؛ جرّب نقطة أخرى");
                 }
@@ -1193,11 +1200,13 @@ public class MainActivity extends ComponentActivity {
 
         addSection(panel, "الفلاش");
         Spinner flashSpinner = new Spinner(this);
-        String[] flashNames = {"تلقائي AUTO", "تشغيل ON", "إيقاف OFF"};
+        boolean videoSettings = activeMode == MODE_VIDEO;
+        String[] flashNames = videoSettings
+                ? new String[]{"الإضاءة المستمرة متوقفة", "الإضاءة المستمرة تعمل"}
+                : new String[]{"تلقائي AUTO", "تشغيل ON", "إيقاف OFF"};
         ArrayAdapter<String> flashAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, flashNames);
         flashAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         flashSpinner.setAdapter(flashAdapter);
-        boolean videoSettings = activeMode == MODE_VIDEO;
         flashSpinner.setSelection(videoSettings ? (torchOn ? 1 : 0) : flashMode);
         flashSpinner.setEnabled(flashAvailable);
         panel.addView(flashSpinner);
@@ -1652,6 +1661,7 @@ public class MainActivity extends ComponentActivity {
         if (sensorManager != null && rotationSensor != null) {
             sensorManager.registerListener(levelListener, rotationSensor, SensorManager.SENSOR_DELAY_UI);
         }
+        if (camera != null) setCaptureEnabled(true);
     }
 
     @Override
@@ -1660,6 +1670,7 @@ public class MainActivity extends ComponentActivity {
         if (countdownRunnable != null) mainHandler.removeCallbacks(countdownRunnable);
         countdownRunnable = null;
         countdownActive = false;
+        if (shutterButton != null) setCaptureEnabled(false);
         if (activeRecording != null) activeRecording.stop();
         super.onPause();
     }
