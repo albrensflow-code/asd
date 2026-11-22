@@ -348,6 +348,7 @@ public class MainActivity extends ComponentActivity {
         core.setColor(Color.rgb(248, 248, 246));
         inner.setBackground(core);
         FrameLayout.LayoutParams innerParams = new FrameLayout.LayoutParams(dp(66), dp(66), Gravity.CENTER);
+        shutterCore = inner;
         outer.addView(inner, innerParams);
 
         outer.setOnClickListener(v -> onShutterPressed());
