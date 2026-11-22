@@ -39,7 +39,19 @@ jobs:
           "$SDKMANAGER" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Build debug APK
-        run: gradle --no-daemon -p Camera :app:assembleDebug
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace --info -p Camera :app:assembleDebug 2>&1 | tee build.log
+
+      - name: Save build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Redmi-Camera-Build-Log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Verify APK package
         run: |
