@@ -140,6 +140,9 @@ public class MainActivity extends ComponentActivity {
     private int activeMode = MODE_PHOTO;
     private int flashMode = FLASH_AUTO;
     private int whiteBalanceMode = AWB_AUTO;
+    private int antiBandingMode = CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO;
+    private boolean manualFocusEnabled = false;
+    private float manualFocusDistance = 0f;
     private int exposureCompensationIndex = 0;
     private int manualIso = 200;
     private long manualExposureNs = 10_000_000L;
@@ -1018,8 +1021,62 @@ public class MainActivity extends ComponentActivity {
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
         });
 
-        addSection(panel, "التحكم اليدوي");
+        addSection(panel, "منع وميض الإضاءة");
+        List<Integer> antiModes = new ArrayList<>();
+        List<String> antiLabels = new ArrayList<>();
+        for (int antiMode : getSupportedAntiBandingModes()) {
+            antiModes.add(antiMode);
+            antiLabels.add(antiBandingName(antiMode));
+        }
+        Spinner antiSpinner = new Spinner(this);
+        ArrayAdapter<String> antiAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, antiLabels);
+        antiAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        antiSpinner.setAdapter(antiAdapter);
+        antiSpinner.setSelection(Math.max(0, antiModes.indexOf(antiBandingMode)));
+        panel.addView(antiSpinner);
+        antiSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (position < antiModes.size()) { antiBandingMode = antiModes.get(position); applyManualCameraOptions(); }
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+
         CameraCharacteristics characteristics = getCurrentCharacteristics();
+        addSection(panel, "التركيز اليدوي");
+        Float focusMaximum = characteristics == null ? null
+                : characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        if (focusMaximum != null && focusMaximum > 0f && activeMode == MODE_PHOTO && !isFrontCamera) {
+            CheckBox focusToggle = new CheckBox(this);
+            focusToggle.setText("تفعيل التركيز اليدوي (بعيد ↔ قريب)");
+            focusToggle.setTextColor(Color.WHITE);
+            focusToggle.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(230, 190, 102)));
+            focusToggle.setChecked(manualFocusEnabled);
+            panel.addView(focusToggle);
+            TextView focusLabel = settingText("مسافة التركيز: " + String.format(Locale.US, "%.2f D", manualFocusDistance), 13, true);
+            panel.addView(focusLabel);
+            SeekBar focusSeek = new SeekBar(this);
+            focusSeek.setMax(100);
+            focusSeek.setProgress(Math.max(0, Math.min(100, Math.round(manualFocusDistance / focusMaximum * 100f))));
+            panel.addView(focusSeek);
+            setManualControlsEnabled(focusToggle.isChecked(), focusLabel, focusSeek, focusLabel, focusSeek);
+            focusToggle.setOnCheckedChangeListener((button, checked) -> {
+                manualFocusEnabled = checked;
+                setManualControlsEnabled(checked, focusLabel, focusSeek, focusLabel, focusSeek);
+                applyManualCameraOptions();
+            });
+            focusSeek.setOnSeekBarChangeListener(new SimpleSeekListener() {
+                @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    if (!fromUser) return;
+                    manualFocusDistance = focusMaximum * progress / 100f;
+                    focusLabel.setText("مسافة التركيز: " + String.format(Locale.US, "%.2f D", manualFocusDistance));
+                    if (manualFocusEnabled) applyManualCameraOptions();
+                }
+            });
+        } else {
+            panel.addView(settingText("هذه العدسة لا تعلن دعم التركيز اليدوي عبر Camera2. استخدم اللمس للتركيز التلقائي.", 12, false));
+        }
+
+        addSection(panel, "التحكم اليدوي");
         boolean manualSupported = isManualExposureSupported(characteristics) && activeMode == MODE_PHOTO && !isFrontCamera;
         if (manualSupported) {
             CheckBox manualToggle = new CheckBox(this);
@@ -1137,6 +1194,21 @@ public class MainActivity extends ComponentActivity {
         return result;
     }
 
+    private int[] getSupportedAntiBandingModes() {
+        CameraCharacteristics characteristics = getCurrentCharacteristics();
+        int[] supported = characteristics == null ? null
+                : characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES);
+        return supported == null || supported.length == 0
+                ? new int[]{CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO} : supported;
+    }
+
+    private String antiBandingName(int mode) {
+        if (mode == CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_50HZ) return "50 هرتز";
+        if (mode == CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_60HZ) return "60 هرتز";
+        if (mode == CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_OFF) return "إيقاف";
+        return "تلقائي";
+    }
+
     private String whiteBalanceName(int mode) {
         switch (mode) {
             case CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT: return "ضوء النهار";
@@ -1220,6 +1292,13 @@ public class MainActivity extends ComponentActivity {
                 builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             }
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, whiteBalanceMode);
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, antiBandingMode);
+            if (manualFocusEnabled) {
+                builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                builder.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocusDistance);
+            } else {
+                builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            }
             Camera2CameraControl.from(camera.getCameraControl()).setCaptureRequestOptions(builder.build());
         } catch (Exception error) {
             setStatus("لم يقبل تعريف الكاميرا هذا التحكم اليدوي.");
@@ -1264,6 +1343,22 @@ public class MainActivity extends ComponentActivity {
             }
         } catch (Exception error) {
             report.append("تعذر قراءة كل بيانات الكاميرا: ").append(safeMessage(error));
+        }
+
+        if (camera != null) {
+            report.append("\nخصائص التصوير المتاحة عبر CameraX:\n");
+            try {
+                Set<Integer> formats = ImageCapture.getImageCaptureCapabilities(camera.getCameraInfo()).getSupportedOutputFormats();
+                report.append("JPEG: متاح\n");
+                report.append("RAW/DNG: ").append(formats.contains(ImageCapture.OUTPUT_FORMAT_RAW) ? "مدعوم" : "غير مدعوم").append('\n');
+                report.append("Ultra HDR: ").append(formats.contains(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR) ? "مدعوم" : "غير مدعوم").append('\n');
+            } catch (Exception ignored) { report.append("تعذر قراءة صيغ الصور الإضافية.\n"); }
+            report.append("تعزيز الإضاءة المباشرة: ").append(camera.getCameraInfo().isLowLightBoostSupported() ? "مدعوم" : "غير مدعوم").append('\n');
+            report.append("كاميرا منطقية متعددة الحساسات: ").append(camera.getCameraInfo().isLogicalMultiCameraSupported() ? "نعم" : "لا").append('\n');
+            try {
+                VideoCapabilities videoCapabilities = Recorder.getVideoCapabilities(camera.getCameraInfo());
+                report.append("تثبيت الفيديو: ").append(videoCapabilities.isStabilizationSupported() ? "مدعوم" : "غير مدعوم").append('\n');
+            } catch (Exception ignored) { report.append("تثبيت الفيديو: لم يعلن النظام عن البيانات.\n"); }
         }
 
         report.append("\nملاحظة: عدسة العمق لا تلتقط صورة عادية مستقلة. الدمج بين الحساسات يتحكم به تعريف شاومي؛ لا يمكن للتطبيق فرض تشغيل أربع حساسات معًا.");
