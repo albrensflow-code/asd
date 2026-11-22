@@ -197,38 +197,45 @@ public class MainActivity extends ComponentActivity {
         header.setPadding(dp(3), 0, dp(3), dp(7));
 
         TextView brand = new TextView(this);
-        brand.setText("REDMI  •  CAMERA");
+        brand.setText("REDMI CAMERA");
         brand.setTextColor(Color.WHITE);
-        brand.setTextSize(15);
-        brand.setLetterSpacing(0.08f);
-        brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        brand.setTextSize(14);
+        brand.setLetterSpacing(0.12f);
+        brand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL), Typeface.BOLD);
+        brand.setShadowLayer(2f, 0f, 1f, 0x88000000);
         header.addView(brand, new LinearLayout.LayoutParams(0, dp(44), 1f));
 
-        timerButton = iconButton("⏱ OFF", 58);
+        timerButton = iconButton("TIMER OFF", 58);
+        timerButton.setTextSize(10);
         timerButton.setOnClickListener(v -> cycleTimer());
-        header.addView(timerButton, new LinearLayout.LayoutParams(dp(58), dp(44)));
+        header.addView(timerButton, new LinearLayout.LayoutParams(dp(57), dp(44)));
 
-        gridButton = iconButton("▦", 42);
+        gridButton = iconButton("GRID", 42);
+        gridButton.setTextSize(10);
         gridButton.setOnClickListener(v -> toggleGrid());
         LinearLayout.LayoutParams gridButtonParams = new LinearLayout.LayoutParams(dp(42), dp(44));
-        gridButtonParams.leftMargin = dp(5);
+        gridButtonParams.leftMargin = dp(3);
         header.addView(gridButton, gridButtonParams);
 
-        flashButton = iconButton("⚡ AUTO", 68);
-        flashButton.setOnClickListener(v -> cycleFlash());
-        LinearLayout.LayoutParams flashParams = new LinearLayout.LayoutParams(dp(68), dp(44));
-        flashParams.leftMargin = dp(5);
+        flashButton = iconButton("AUTO", 52);
+        flashButton.setTextSize(12);
+        flashButton.setTextColor(Color.rgb(230, 190, 102));
+        flashButton.setOnClickListener(v -> resetAutoMode());
+        LinearLayout.LayoutParams flashParams = new LinearLayout.LayoutParams(dp(52), dp(44));
+        flashParams.leftMargin = dp(3);
         header.addView(flashButton, flashParams);
 
-        TextView colorButton = iconButton("🎨", 42);
-        LinearLayout.LayoutParams colorParams = new LinearLayout.LayoutParams(dp(42), dp(44));
-        colorParams.leftMargin = dp(5);
+        TextView colorButton = iconButton("COLOR", 46);
+        colorButton.setTextSize(10);
+        LinearLayout.LayoutParams colorParams = new LinearLayout.LayoutParams(dp(46), dp(44));
+        colorParams.leftMargin = dp(3);
         header.addView(colorButton, colorParams);
         colorButton.setOnClickListener(v -> openColorLab());
 
-        TextView settingsButton = iconButton("⚙", 42);
-        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(42), dp(44));
-        settingsParams.leftMargin = dp(5);
+        TextView settingsButton = iconButton("⚙", 36);
+        settingsButton.setTextSize(20);
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(36), dp(44));
+        settingsParams.leftMargin = dp(3);
         header.addView(settingsButton, settingsParams);
         settingsButton.setOnClickListener(v -> showProSettings());
 
@@ -304,9 +311,11 @@ public class MainActivity extends ComponentActivity {
         captureRow.setGravity(Gravity.CENTER);
         captureRow.setPadding(dp(8), dp(3), dp(8), dp(2));
 
-        TextView galleryButton = iconButton("▣", 52);
+        TextView galleryButton = iconButton("GALLERY", 56);
+        galleryButton.setTextSize(9);
+        galleryButton.setTextColor(Color.rgb(210, 215, 224));
         galleryButton.setOnClickListener(v -> openGallery());
-        captureRow.addView(galleryButton, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        captureRow.addView(galleryButton, new LinearLayout.LayoutParams(dp(64), dp(56)));
 
         FrameLayout shutterHolder = new FrameLayout(this);
         shutterButton = createShutter();
@@ -315,8 +324,11 @@ public class MainActivity extends ComponentActivity {
         captureRow.addView(shutterHolder, shutterParams);
 
         TextView switchButton = iconButton("↻", 52);
+        switchButton.setTextSize(34);
+        switchButton.setTextColor(Color.rgb(242, 244, 247));
+        switchButton.setContentDescription("تبديل الكاميرا الأمامية والخلفية");
         switchButton.setOnClickListener(v -> switchCamera());
-        captureRow.addView(switchButton, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        captureRow.addView(switchButton, new LinearLayout.LayoutParams(dp(64), dp(64)));
 
         LinearLayout.LayoutParams captureParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(94));
@@ -373,9 +385,11 @@ public class MainActivity extends ComponentActivity {
         view.setTextSize(15);
         view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         view.setGravity(Gravity.CENTER);
-        view.setBackground(roundRect(Color.rgb(31, 37, 47), 18, 0, Color.TRANSPARENT));
+        view.setBackgroundColor(Color.TRANSPARENT);
+        view.setPadding(0, 0, 0, 0);
         view.setClickable(true);
         view.setFocusable(true);
+        view.setShadowLayer(1.5f, 0f, 1f, 0x77000000);
         return view;
     }
 
@@ -386,8 +400,9 @@ public class MainActivity extends ComponentActivity {
         view.setTextSize(size);
         view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         view.setGravity(Gravity.CENTER);
-        view.setPadding(dp(11), 0, dp(11), 0);
-        view.setBackground(roundRect(0x99090C12, 30, 0, Color.TRANSPARENT));
+        view.setPadding(0, 0, 0, 0);
+        view.setBackgroundColor(Color.TRANSPARENT);
+        view.setShadowLayer(2.5f, 0f, 1.5f, 0xCC000000);
         return view;
     }
 
@@ -468,6 +483,7 @@ public class MainActivity extends ComponentActivity {
         if (previewView == null) return;
         setCaptureEnabled(false);
         setStatus("جارٍ تشغيل الكاميرا...");
+        if (flashButton != null) flashButton.setText("AUTO");
         ListenableFuture<ProcessCameraProvider> providerFuture =
                 ProcessCameraProvider.getInstance(getApplicationContext());
         providerFuture.addListener(() -> {
@@ -732,6 +748,37 @@ public class MainActivity extends ComponentActivity {
         startCamera();
     }
 
+    private void resetAutoMode() {
+        if (activeRecording != null) {
+            Toast.makeText(this, "أوقف تسجيل الفيديو أولًا.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        activeMode = MODE_PHOTO;
+        flashMode = FLASH_AUTO;
+        torchOn = false;
+        manualExposureEnabled = false;
+        manualFocusEnabled = false;
+        manualFocusDistance = 0f;
+        manualIso = 200;
+        manualExposureNs = 10_000_000L;
+        whiteBalanceMode = AWB_AUTO;
+        antiBandingMode = CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO;
+        exposureCompensationIndex = 0;
+        updateModeButtons();
+        if (camera != null) {
+            try {
+                camera.getCameraControl().enableTorch(false);
+                camera.getCameraControl().setExposureCompensationIndex(0);
+                Camera2CameraControl.from(camera.getCameraControl()).clearCaptureRequestOptions();
+            } catch (Exception ignored) { }
+        }
+        if (imageCapture != null) imageCapture.setFlashMode(ImageCapture.FLASH_MODE_AUTO);
+        flashButton.setText("AUTO");
+        setStatus("AUTO • تركيز وتعريض وألوان تلقائية");
+        Toast.makeText(this, "رجعت كل إعدادات التصوير إلى AUTO", Toast.LENGTH_SHORT).show();
+        if (activeMode != MODE_PHOTO) startCamera();
+    }
+
     private void cycleFlash() {
         if (!flashAvailable || camera == null) return;
         if (activeMode == MODE_VIDEO) {
@@ -749,13 +796,7 @@ public class MainActivity extends ComponentActivity {
 
     private void updateFlashLabel() {
         if (flashButton == null) return;
-        if (activeMode == MODE_VIDEO) {
-            flashButton.setText(torchOn ? "☼ LIGHT ON" : "☼ LIGHT OFF");
-            return;
-        }
-        String label = flashMode == FLASH_AUTO ? "⚡ AUTO"
-                : flashMode == FLASH_ON ? "⚡ ON" : "⚡ OFF";
-        flashButton.setText(label);
+        flashButton.setText("AUTO");
     }
 
 
@@ -784,7 +825,7 @@ public class MainActivity extends ComponentActivity {
     private void cycleTimer() {
         timerIndex = (timerIndex + 1) % timerValues.length;
         int seconds = timerValues[timerIndex];
-        timerButton.setText(seconds == 0 ? "⏱ OFF" : "⏱ " + seconds + "s");
+        timerButton.setText(seconds == 0 ? "TIMER OFF" : "TIMER " + seconds + "s");
     }
 
     private void toggleGrid() {
@@ -793,7 +834,7 @@ public class MainActivity extends ComponentActivity {
             gridOverlay.setGridVisible(gridEnabled);
             gridOverlay.setVisibility(gridEnabled ? View.VISIBLE : View.GONE);
         }
-        if (gridButton != null) gridButton.setText(gridEnabled ? "▦ ON" : "▦");
+        if (gridButton != null) gridButton.setText(gridEnabled ? "GRID ON" : "GRID");
     }
 
     private void openColorLab() {
@@ -973,6 +1014,28 @@ public class MainActivity extends ComponentActivity {
 
         TextView intro = settingText("تحكم بالصورة حسب ما تسمح به عدسة الهاتف. بعض الخيارات قد تختفي إذا لم يدعمها تعريف شاومي.", 12, false);
         panel.addView(intro);
+
+        addSection(panel, "الفلاش");
+        Spinner flashSpinner = new Spinner(this);
+        String[] flashNames = {"تلقائي AUTO", "تشغيل ON", "إيقاف OFF"};
+        ArrayAdapter<String> flashAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, flashNames);
+        flashAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        flashSpinner.setAdapter(flashAdapter);
+        flashSpinner.setSelection(flashMode);
+        panel.addView(flashSpinner);
+        flashSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            private boolean first = true;
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (first) { first = false; return; }
+                flashMode = position;
+                if (imageCapture != null) {
+                    imageCapture.setFlashMode(position == FLASH_AUTO ? ImageCapture.FLASH_MODE_AUTO
+                            : position == FLASH_ON ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
+                }
+                updateFlashLabel();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
 
         addSection(panel, "التعريض");
         android.util.Range<Integer> evRange = camera.getCameraInfo().getExposureState().getExposureCompensationRange();
