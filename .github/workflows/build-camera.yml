@@ -1,5 +1,9 @@
 name: Build Redmi Camera APK
 
+concurrency:
+  group: redmi-camera-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     paths:
@@ -45,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gradle --no-daemon --stacktrace --info -p Camera :app:assembleDebug 2>&1 | tee build.log
+          gradle --no-daemon --stacktrace --info -p Camera :app:testDebugUnitTest :app:assembleDebug 2>&1 | tee build.log
 
       - name: Save build log
         if: always()

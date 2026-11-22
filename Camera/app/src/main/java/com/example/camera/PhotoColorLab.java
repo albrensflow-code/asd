@@ -26,6 +26,8 @@ import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 
@@ -89,7 +91,7 @@ public final class PhotoColorLab {
             bars[i].setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                 @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                     values[index].setText(valueText(index, progress));
-                    if (fromUser) presets.setSelection(0);
+                    // Keep the selected preset visible; manual slider changes refine it rather than resetting it.
                 }
                 @Override public void onStartTrackingTouch(SeekBar seekBar) { }
                 @Override public void onStopTrackingTouch(SeekBar seekBar) { }
@@ -165,13 +167,7 @@ public final class PhotoColorLab {
     }
 
     private Uri renderCopy(Uri source, int[] setting) throws Exception {
-        int orientation = ExifInterface.ORIENTATION_NORMAL;
-        try (InputStream exifInput = activity.getContentResolver().openInputStream(source)) {
-            if (exifInput != null) {
-                ExifInterface exif = new ExifInterface(exifInput);
-                orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
-            }
-        }
+        Map<String, String> originalMetadata = readExifMetadata(source);
 
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inPreferredConfig = Bitmap.Config.ARGB_8888;
@@ -214,7 +210,9 @@ public final class PhotoColorLab {
             try (ParcelFileDescriptor descriptor = activity.getContentResolver().openFileDescriptor(destination, "rw")) {
                 if (descriptor != null) {
                     ExifInterface outputExif = new ExifInterface(descriptor.getFileDescriptor());
-                    outputExif.setAttribute(ExifInterface.TAG_ORIENTATION, String.valueOf(orientation));
+                    for (Map.Entry<String, String> entry : originalMetadata.entrySet()) {
+                        outputExif.setAttribute(entry.getKey(), entry.getValue());
+                    }
                     outputExif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, "Edited with Redmi Camera Color Studio");
                     outputExif.saveAttributes();
                 }
@@ -227,13 +225,48 @@ public final class PhotoColorLab {
         }
     }
 
+    private Map<String, String> readExifMetadata(Uri source) throws IOException {
+        Map<String, String> metadata = new LinkedHashMap<>();
+        String[] tags = {
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.TAG_DATETIME,
+                ExifInterface.TAG_DATETIME_ORIGINAL,
+                ExifInterface.TAG_MAKE,
+                ExifInterface.TAG_MODEL,
+                ExifInterface.TAG_SOFTWARE,
+                ExifInterface.TAG_EXPOSURE_TIME,
+                ExifInterface.TAG_F_NUMBER,
+                ExifInterface.TAG_ISO_SPEED_RATINGS,
+                ExifInterface.TAG_FOCAL_LENGTH,
+                ExifInterface.TAG_FLASH,
+                ExifInterface.TAG_WHITE_BALANCE,
+                ExifInterface.TAG_GPS_LATITUDE,
+                ExifInterface.TAG_GPS_LATITUDE_REF,
+                ExifInterface.TAG_GPS_LONGITUDE,
+                ExifInterface.TAG_GPS_LONGITUDE_REF,
+                ExifInterface.TAG_GPS_ALTITUDE,
+                ExifInterface.TAG_GPS_ALTITUDE_REF,
+                ExifInterface.TAG_GPS_TIMESTAMP,
+                ExifInterface.TAG_GPS_DATESTAMP
+        };
+        try (InputStream input = activity.getContentResolver().openInputStream(source)) {
+            if (input == null) throw new IOException("لم أستطع قراءة بيانات الصورة الأصلية.");
+            ExifInterface exif = new ExifInterface(input);
+            for (String tag : tags) {
+                String value = exif.getAttribute(tag);
+                if (value != null) metadata.put(tag, value);
+            }
+        }
+        return metadata;
+    }
+
     private void applyColorGrade(Bitmap bitmap, int[] s) {
         int width = bitmap.getWidth();
         int height = bitmap.getHeight();
         int[] row = new int[width];
 
         float contrast = 0.55f + (s[0] / 100f) * 0.90f;
-        float saturation = (s[1] / 100f) * 1.90f;
+        float saturation = (s[1] / 100f) * 2.0f;
         float brightness = (s[2] - 50) * 1.15f;
         float warmth = (s[3] - 50) * 0.72f;
         float redBoost = s[4] / 100f;
