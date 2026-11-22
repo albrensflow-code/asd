@@ -1,9 +1,10 @@
-name: Build Camera APK
+name: Build Redmi Camera APK
 
 on:
   push:
     paths:
-      - 'Camera-APK-Ready.zip'
+      - 'Camera/**'
+      - '.github/workflows/build-camera.yml'
   workflow_dispatch:
 
 permissions:
@@ -33,17 +34,19 @@ jobs:
       - name: Install Android SDK packages
         run: sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Unpack Android project
-        run: unzip -q Camera-APK-Ready.zip -d project
-
       - name: Build debug APK
-        working-directory: project/Camera
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon -p Camera :app:assembleDebug
+
+      - name: Verify APK package
+        run: |
+          APK="Camera/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | grep -E "package: name='com.example.camera'|application-label:"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Camera-debug-APK
-          path: project/Camera/app/build/outputs/apk/debug/app-debug.apk
+          name: Redmi-Camera-APK
+          path: Camera/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
