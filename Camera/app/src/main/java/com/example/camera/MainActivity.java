@@ -1,35 +1,57 @@
 package com.example.camera;
 
 import android.Manifest;
+import android.app.AlertDialog;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureRequest;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowManager;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.camera.camera2.interop.Camera2CameraControl;
+import androidx.camera.camera2.interop.Camera2CameraInfo;
+import androidx.camera.camera2.interop.CaptureRequestOptions;
 import androidx.camera.core.Camera;
+import androidx.camera.core.CameraInfo;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.FocusMeteringAction;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
+import androidx.camera.core.MeteringPoint;
 import androidx.camera.core.Preview;
+import androidx.camera.core.ProcessCameraProvider;
+import androidx.camera.core.ZoomState;
+import androidx.camera.extensions.ExtensionMode;
+import androidx.camera.extensions.ExtensionsManager;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
@@ -37,38 +59,74 @@ import androidx.core.content.ContextCompat;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends ComponentActivity {
+    private static final int MODE_PHOTO = 0;
+    private static final int MODE_HDR = 1;
+    private static final int MODE_NIGHT = 2;
+    private static final int MODE_PORTRAIT = 3;
+
+    private static final int FLASH_AUTO = 0;
+    private static final int FLASH_ON = 1;
+    private static final int FLASH_OFF = 2;
+
+    private static final int AWB_AUTO = CaptureRequest.CONTROL_AWB_MODE_AUTO;
+
     private PreviewView previewView;
     private TextView statusText;
-    private Button captureButton;
-    private Button flashButton;
-    private Button switchButton;
+    private TextView previewBadge;
+    private TextView focusHint;
+    private TextView flashButton;
+    private TextView lensButton;
+    private FrameLayout shutterButton;
+    private LinearLayout zoomRow;
+    private LinearLayout modeRow;
+
     private ImageCapture imageCapture;
     private ProcessCameraProvider cameraProvider;
-    private boolean frontCamera = false;
-    private boolean flashOn = false;
-    private boolean flashAvailable = false;
-
+    private ExtensionsManager extensionsManager;
+    private Camera camera;
+    private CameraManager cameraManager;
     private ActivityResultLauncher<String> cameraPermissionLauncher;
+
+    private final List<String> backCameraIds = new ArrayList<>();
+    private final List<String> frontCameraIds = new ArrayList<>();
+    private final List<Button> modeButtons = new ArrayList<>();
+    private String selectedBackCameraId;
+    private int backLensIndex = 0;
+    private int activeMode = MODE_PHOTO;
+    private int flashMode = FLASH_AUTO;
+    private int whiteBalanceMode = AWB_AUTO;
+    private int exposureCompensationIndex = 0;
+    private int manualIso = 200;
+    private long manualExposureNs = 10_000_000L;
+    private boolean manualExposureEnabled = false;
+    private boolean isFrontCamera = false;
+    private boolean flashAvailable = false;
+    private Uri lastPhotoUri;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        getWindow().setStatusBarColor(Color.rgb(9, 11, 15));
-        getWindow().setNavigationBarColor(Color.rgb(9, 11, 15));
+        getWindow().setStatusBarColor(Color.rgb(8, 10, 14));
+        getWindow().setNavigationBarColor(Color.rgb(8, 10, 14));
+        getWindow().getDecorView().setSystemUiVisibility(0);
 
+        cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
         cameraPermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(),
                 granted -> {
-                    if (granted) {
-                        startCamera();
-                    } else {
-                        statusText.setText("يلزم السماح للكاميرا حتى تعمل المعاينة والتصوير.");
-                        Toast.makeText(this, "لم يتم منح إذن الكاميرا", Toast.LENGTH_LONG).show();
+                    if (granted) startCamera();
+                    else {
+                        setStatus("اسمح للتطبيق باستخدام الكاميرا حتى تظهر المعاينة.");
+                        Toast.makeText(this, "إذن الكاميرا مطلوب", Toast.LENGTH_LONG).show();
                     }
                 });
 
@@ -84,107 +142,251 @@ public class MainActivity extends ComponentActivity {
     private View createScreen() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        root.setBackgroundColor(Color.rgb(9, 11, 15));
-        root.setPadding(dp(14), dp(10), dp(14), dp(12));
+        root.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+        root.setBackgroundColor(Color.rgb(8, 10, 14));
+        root.setPadding(dp(12), dp(7), dp(12), dp(8));
 
         LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.VERTICAL);
-        header.setPadding(dp(3), dp(2), dp(3), dp(10));
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setPadding(dp(3), 0, dp(3), dp(7));
 
-        TextView title = new TextView(this);
-        title.setText("كاميرا Redmi");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(25);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        header.addView(title);
+        TextView brand = new TextView(this);
+        brand.setText("REDMI  •  CAMERA");
+        brand.setTextColor(Color.WHITE);
+        brand.setTextSize(15);
+        brand.setLetterSpacing(0.08f);
+        brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        header.addView(brand, new LinearLayout.LayoutParams(0, dp(44), 1f));
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("تصوير واضح • معاينة مباشرة • حفظ في معرض الصور");
-        subtitle.setTextColor(Color.rgb(174, 178, 186));
-        subtitle.setTextSize(11);
-        header.addView(subtitle);
+        flashButton = iconButton("⚡ AUTO", 70);
+        flashButton.setOnClickListener(v -> cycleFlash());
+        header.addView(flashButton);
+
+        TextView settingsButton = iconButton("⚙", 48);
+        LinearLayout.LayoutParams settingsParams = new LinearLayout.LayoutParams(dp(48), dp(44));
+        settingsParams.leftMargin = dp(7);
+        header.addView(settingsButton, settingsParams);
+        settingsButton.setOnClickListener(v -> showProSettings());
+
         root.addView(header);
 
         FrameLayout previewFrame = new FrameLayout(this);
-        previewFrame.setBackgroundColor(Color.rgb(22, 25, 31));
+        previewFrame.setBackground(roundRect(Color.rgb(17, 21, 28), 22, 0, Color.TRANSPARENT));
+        previewFrame.setClipToOutline(true);
+
         previewView = new PreviewView(this);
         previewView.setImplementationMode(PreviewView.ImplementationMode.COMPATIBLE);
         previewView.setScaleType(PreviewView.ScaleType.FILL_CENTER);
         previewFrame.addView(previewView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        previewBadge = overlayLabel("AUTO  •  PHOTO", 12);
+        FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, dp(30), Gravity.TOP | Gravity.LEFT);
+        badgeParams.setMargins(dp(12), dp(12), 0, 0);
+        previewFrame.addView(previewBadge, badgeParams);
+
+        focusHint = overlayLabel("المس الشاشة للتركيز", 11);
+        FrameLayout.LayoutParams focusParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, dp(28), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        focusParams.bottomMargin = dp(12);
+        previewFrame.addView(focusHint, focusParams);
+
+        previewView.setOnTouchListener((view, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                focusAt(event.getX(), event.getY());
+                return true;
+            }
+            return true;
+        });
+
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
-        previewParams.bottomMargin = dp(12);
+        previewParams.bottomMargin = dp(9);
         root.addView(previewFrame, previewParams);
+
+        zoomRow = new LinearLayout(this);
+        zoomRow.setOrientation(LinearLayout.HORIZONTAL);
+        zoomRow.setGravity(Gravity.CENTER);
+        zoomRow.setPadding(0, dp(1), 0, dp(7));
+        root.addView(zoomRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+
+        HorizontalScrollView modeScroll = new HorizontalScrollView(this);
+        modeScroll.setHorizontalScrollBarEnabled(false);
+        modeScroll.setFillViewport(false);
+        modeRow = new LinearLayout(this);
+        modeRow.setOrientation(LinearLayout.HORIZONTAL);
+        modeRow.setGravity(Gravity.CENTER);
+        modeScroll.addView(modeRow);
+        LinearLayout.LayoutParams modeParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(47));
+        modeParams.bottomMargin = dp(5);
+        root.addView(modeScroll, modeParams);
+        addModeButton("صورة", MODE_PHOTO);
+        addModeButton("HDR", MODE_HDR);
+        addModeButton("ليل", MODE_NIGHT);
+        addModeButton("بورتريه", MODE_PORTRAIT);
+        updateModeButtons();
+
+        LinearLayout captureRow = new LinearLayout(this);
+        captureRow.setOrientation(LinearLayout.HORIZONTAL);
+        captureRow.setGravity(Gravity.CENTER);
+        captureRow.setPadding(dp(8), dp(3), dp(8), dp(2));
+
+        TextView galleryButton = iconButton("▣", 52);
+        galleryButton.setOnClickListener(v -> openGallery());
+        captureRow.addView(galleryButton, new LinearLayout.LayoutParams(dp(56), dp(56)));
+
+        FrameLayout shutterHolder = new FrameLayout(this);
+        shutterButton = createShutter();
+        shutterHolder.addView(shutterButton, new FrameLayout.LayoutParams(dp(88), dp(88), Gravity.CENTER));
+        LinearLayout.LayoutParams shutterParams = new LinearLayout.LayoutParams(0, dp(88), 1f);
+        captureRow.addView(shutterHolder, shutterParams);
+
+        TextView switchButton = iconButton("↻", 52);
+        switchButton.setOnClickListener(v -> switchCamera());
+        captureRow.addView(switchButton, new LinearLayout.LayoutParams(dp(56), dp(56)));
+
+        LinearLayout.LayoutParams captureParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(94));
+        root.addView(captureRow, captureParams);
 
         statusText = new TextView(this);
         statusText.setText("جارٍ تجهيز الكاميرا...");
-        statusText.setTextColor(Color.rgb(205, 208, 214));
-        statusText.setTextSize(12);
-        statusText.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
-        statusText.setPadding(dp(4), dp(2), dp(4), dp(10));
-        root.addView(statusText);
-
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        actions.setGravity(Gravity.CENTER_VERTICAL);
-
-        switchButton = makeButton("تبديل", false);
-        switchButton.setOnClickListener(v -> {
-            frontCamera = !frontCamera;
-            flashOn = false;
-            startCamera();
-        });
-        actions.addView(switchButton, new LinearLayout.LayoutParams(0, dp(54), 1f));
-
-        View spacerOne = new View(this);
-        actions.addView(spacerOne, new LinearLayout.LayoutParams(dp(8), 1));
-
-        flashButton = makeButton("الفلاش مغلق", false);
-        flashButton.setEnabled(false);
-        flashButton.setOnClickListener(v -> {
-            if (!flashAvailable || imageCapture == null) return;
-            flashOn = !flashOn;
-            imageCapture.setFlashMode(flashOn
-                    ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
-            flashButton.setText(flashOn ? "الفلاش يعمل" : "الفلاش مغلق");
-            statusText.setText(flashOn ? "تم تشغيل الفلاش للصورة التالية." : "تم إيقاف الفلاش.");
-        });
-        actions.addView(flashButton, new LinearLayout.LayoutParams(0, dp(54), 1f));
-
-        View spacerTwo = new View(this);
-        actions.addView(spacerTwo, new LinearLayout.LayoutParams(dp(8), 1));
-
-        captureButton = makeButton("تصوير", true);
-        captureButton.setEnabled(false);
-        captureButton.setOnClickListener(v -> capturePhoto());
-        actions.addView(captureButton, new LinearLayout.LayoutParams(0, dp(54), 1.25f));
-        root.addView(actions);
-
-        Button reportButton = makeButton("معلومات كاميرات الجهاز", false);
-        reportButton.setOnClickListener(v -> showDeviceReport());
-        LinearLayout.LayoutParams reportParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        reportParams.topMargin = dp(8);
-        root.addView(reportButton, reportParams);
+        statusText.setTextColor(Color.rgb(165, 173, 185));
+        statusText.setTextSize(10);
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setSingleLine(true);
+        statusText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        root.addView(statusText, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(21)));
 
         return root;
     }
 
-    private Button makeButton(String label, boolean primary) {
+    private FrameLayout createShutter() {
+        FrameLayout outer = new FrameLayout(this);
+        GradientDrawable ring = new GradientDrawable();
+        ring.setShape(GradientDrawable.OVAL);
+        ring.setColor(Color.TRANSPARENT);
+        ring.setStroke(dp(4), Color.WHITE);
+        outer.setBackground(ring);
+        outer.setClickable(true);
+        outer.setFocusable(true);
+
+        View inner = new View(this);
+        GradientDrawable core = new GradientDrawable();
+        core.setShape(GradientDrawable.OVAL);
+        core.setColor(Color.rgb(248, 248, 246));
+        inner.setBackground(core);
+        FrameLayout.LayoutParams innerParams = new FrameLayout.LayoutParams(dp(66), dp(66), Gravity.CENTER);
+        outer.addView(inner, innerParams);
+
+        outer.setOnClickListener(v -> capturePhoto());
+        outer.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) v.setScaleX(0.94f);
+            if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                v.setScaleX(1f);
+                v.setScaleY(1f);
+            }
+            return false;
+        });
+        return outer;
+    }
+
+    private TextView iconButton(String label, int widthDp) {
+        TextView view = new TextView(this);
+        view.setText(label);
+        view.setTextColor(Color.WHITE);
+        view.setTextSize(15);
+        view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        view.setGravity(Gravity.CENTER);
+        view.setBackground(roundRect(Color.rgb(31, 37, 47), 18, 0, Color.TRANSPARENT));
+        view.setClickable(true);
+        view.setFocusable(true);
+        return view;
+    }
+
+    private TextView overlayLabel(String label, int size) {
+        TextView view = new TextView(this);
+        view.setText(label);
+        view.setTextColor(Color.WHITE);
+        view.setTextSize(size);
+        view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(11), 0, dp(11), 0);
+        view.setBackground(roundRect(0x99090C12, 30, 0, Color.TRANSPARENT));
+        return view;
+    }
+
+    private GradientDrawable roundRect(int color, int radiusDp, int strokeDp, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radiusDp));
+        if (strokeDp > 0) drawable.setStroke(dp(strokeDp), strokeColor);
+        return drawable;
+    }
+
+    private Button pillButton(String text, boolean selected) {
         Button button = new Button(this);
-        button.setText(label);
+        button.setText(text);
         button.setTextSize(12);
         button.setAllCaps(false);
         button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setTextColor(primary ? Color.rgb(17, 18, 20) : Color.WHITE);
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(primary ? Color.rgb(224, 179, 79) : Color.rgb(37, 42, 50));
-        background.setCornerRadius(dp(14));
-        button.setBackground(background);
-        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setTextColor(selected ? Color.rgb(12, 14, 17) : Color.rgb(224, 228, 235));
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setPadding(dp(14), 0, dp(14), 0);
+        button.setBackground(roundRect(
+                selected ? Color.rgb(230, 190, 102) : Color.rgb(31, 37, 47),
+                24, selected ? 0 : 1, Color.rgb(54, 62, 75)));
         return button;
+    }
+
+    private void addModeButton(String label, int mode) {
+        Button button = pillButton(label, mode == activeMode);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, dp(39));
+        params.leftMargin = dp(4);
+        params.rightMargin = dp(4);
+        modeRow.addView(button, params);
+        modeButtons.add(button);
+        button.setOnClickListener(v -> {
+            if (activeMode == mode) return;
+            activeMode = mode;
+            updateModeButtons();
+            startCamera();
+        });
+    }
+
+    private void updateModeButtons() {
+        int[] modes = {MODE_PHOTO, MODE_HDR, MODE_NIGHT, MODE_PORTRAIT};
+        for (int i = 0; i < modeButtons.size(); i++) {
+            boolean selected = modes[i] == activeMode;
+            Button button = modeButtons.get(i);
+            button.setTextColor(selected ? Color.rgb(12, 14, 17) : Color.rgb(224, 228, 235));
+            button.setBackground(roundRect(
+                    selected ? Color.rgb(230, 190, 102) : Color.rgb(31, 37, 47),
+                    24, selected ? 0 : 1, Color.rgb(54, 62, 75)));
+        }
+        String name = modeName(activeMode);
+        if (previewBadge != null) previewBadge.setText("AUTO  •  " + name.toUpperCase(Locale.ROOT));
+    }
+
+    private String modeName(int mode) {
+        if (mode == MODE_HDR) return "HDR";
+        if (mode == MODE_NIGHT) return "ليل";
+        if (mode == MODE_PORTRAIT) return "بورتريه";
+        return "صورة";
+    }
+
+    private int extensionMode(int mode) {
+        if (mode == MODE_HDR) return ExtensionMode.HDR;
+        if (mode == MODE_NIGHT) return ExtensionMode.NIGHT;
+        if (mode == MODE_PORTRAIT) return ExtensionMode.BOKEH;
+        return ExtensionMode.NONE;
     }
 
     private int dp(float value) {
@@ -193,132 +395,651 @@ public class MainActivity extends ComponentActivity {
 
     private void startCamera() {
         if (previewView == null) return;
-        captureButton.setEnabled(false);
-        statusText.setText("جارٍ تشغيل الكاميرا...");
+        setCaptureEnabled(false);
+        setStatus("جارٍ تشغيل الكاميرا...");
         ListenableFuture<ProcessCameraProvider> providerFuture =
-                ProcessCameraProvider.getInstance(this);
-
+                ProcessCameraProvider.getInstance(getApplicationContext());
         providerFuture.addListener(() -> {
             try {
                 cameraProvider = providerFuture.get();
-                Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(previewView.getSurfaceProvider());
-
-                imageCapture = new ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                        .build();
-
-                CameraSelector selector = frontCamera
-                        ? CameraSelector.DEFAULT_FRONT_CAMERA
-                        : CameraSelector.DEFAULT_BACK_CAMERA;
-
-                cameraProvider.unbindAll();
-                Camera camera = cameraProvider.bindToLifecycle(
-                        this, selector, preview, imageCapture);
-
-                flashAvailable = camera.getCameraInfo().hasFlashUnit() && !frontCamera;
-                flashButton.setEnabled(flashAvailable);
-                flashOn = false;
-                imageCapture.setFlashMode(ImageCapture.FLASH_MODE_OFF);
-                flashButton.setText("الفلاش مغلق");
-                captureButton.setEnabled(true);
-                switchButton.setEnabled(true);
-                statusText.setText(frontCamera
-                        ? "الكاميرا الأمامية جاهزة."
-                        : "الكاميرا الخلفية جاهزة. اضغط تصوير لالتقاط صورة.");
-            } catch (Exception exception) {
-                captureButton.setEnabled(false);
-                flashButton.setEnabled(false);
-                statusText.setText("تعذر تشغيل الكاميرا: " + safeMessage(exception));
+                if (extensionsManager == null) {
+                    ListenableFuture<ExtensionsManager> extensionFuture =
+                            ExtensionsManager.getInstanceAsync(getApplicationContext(), cameraProvider);
+                    extensionFuture.addListener(() -> {
+                        try {
+                            extensionsManager = extensionFuture.get();
+                        } catch (Exception ignored) {
+                            extensionsManager = null;
+                        }
+                        refreshCameraLists();
+                        bindCamera();
+                    }, ContextCompat.getMainExecutor(this));
+                } else {
+                    refreshCameraLists();
+                    bindCamera();
+                }
+            } catch (Exception error) {
+                setStatus("تعذر تهيئة الكاميرا: " + safeMessage(error));
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
-    private void capturePhoto() {
-        if (imageCapture == null) {
-            statusText.setText("الكاميرا غير جاهزة بعد.");
+    private void refreshCameraLists() {
+        backCameraIds.clear();
+        frontCameraIds.clear();
+        if (cameraProvider == null) return;
+        for (CameraInfo info : cameraProvider.getAvailableCameraInfos()) {
+            try {
+                String id = Camera2CameraInfo.from(info).getCameraId();
+                Integer facing = info.getLensFacing();
+                if (facing != null && facing == CameraSelector.LENS_FACING_BACK) {
+                    if (!backCameraIds.contains(id)) backCameraIds.add(id);
+                } else if (facing != null && facing == CameraSelector.LENS_FACING_FRONT) {
+                    if (!frontCameraIds.contains(id)) frontCameraIds.add(id);
+                }
+            } catch (Exception ignored) {
+                // Some OEM camera implementations do not expose Camera2 metadata to CameraX.
+            }
+        }
+        if (selectedBackCameraId == null && !backCameraIds.isEmpty()) {
+            selectedBackCameraId = backCameraIds.get(0);
+        }
+        if (selectedBackCameraId != null && !backCameraIds.contains(selectedBackCameraId)
+                && !backCameraIds.isEmpty()) {
+            selectedBackCameraId = backCameraIds.get(0);
+            backLensIndex = 0;
+        }
+        updateLensButton();
+    }
+
+    private CameraSelector baseCameraSelector() {
+        if (isFrontCamera || backCameraIds.isEmpty()) {
+            return isFrontCamera
+                    ? CameraSelector.DEFAULT_FRONT_CAMERA
+                    : CameraSelector.DEFAULT_BACK_CAMERA;
+        }
+        final String targetId = selectedBackCameraId;
+        return new CameraSelector.Builder().addCameraFilter(cameraInfos -> {
+            List<CameraInfo> filtered = new ArrayList<>();
+            for (CameraInfo info : cameraInfos) {
+                try {
+                    if (targetId.equals(Camera2CameraInfo.from(info).getCameraId())) filtered.add(info);
+                } catch (Exception ignored) {
+                }
+            }
+            return filtered;
+        }).build();
+    }
+
+    private void bindCamera() {
+        if (cameraProvider == null || previewView == null) return;
+        try {
+            CameraSelector baseSelector = baseCameraSelector();
+            CameraSelector finalSelector = baseSelector;
+
+            if (!isFrontCamera && activeMode != MODE_PHOTO && extensionsManager != null) {
+                int ext = extensionMode(activeMode);
+                if (extensionsManager.isExtensionAvailable(baseSelector, ext)) {
+                    finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ext);
+                } else {
+                    activeMode = MODE_PHOTO;
+                    updateModeButtons();
+                    Toast.makeText(this, "هذا الوضع غير مدعوم من تعريف الكاميرا؛ رجعنا للوضع العادي.", Toast.LENGTH_LONG).show();
+                }
+            } else if (activeMode != MODE_PHOTO) {
+                activeMode = MODE_PHOTO;
+                updateModeButtons();
+            }
+
+            Preview preview = new Preview.Builder().build();
+            preview.setSurfaceProvider(previewView.getSurfaceProvider());
+
+            imageCapture = new ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setJpegQuality(100)
+                    .build();
+
+            cameraProvider.unbindAll();
+            camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+
+            flashAvailable = camera.getCameraInfo().hasFlashUnit() && !isFrontCamera;
+            flashButton.setEnabled(flashAvailable);
+            flashButton.setAlpha(flashAvailable ? 1f : 0.45f);
+            updateFlashLabel();
+            exposureCompensationIndex = camera.getCameraInfo().getExposureState()
+                    .getExposureCompensationIndex();
+            setCaptureEnabled(true);
+            updateZoomButtons();
+            updateLensButton();
+
+            String lens = isFrontCamera ? "أمامية" : describeSelectedLens();
+            setStatus("جاهزة • " + lens + " • " + modeName(activeMode));
+            if (previewBadge != null) previewBadge.setText("AUTO  •  " + modeName(activeMode).toUpperCase(Locale.ROOT));
+        } catch (Exception error) {
+            setCaptureEnabled(false);
+            setStatus("لم تعمل هذه العدسة/الميزة: " + safeMessage(error));
+        }
+    }
+
+    private String describeSelectedLens() {
+        if (selectedBackCameraId == null || cameraManager == null) return "خلفية";
+        try {
+            CameraCharacteristics c = cameraManager.getCameraCharacteristics(selectedBackCameraId);
+            float[] focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_LENGTHS);
+            if (focal != null && focal.length > 0) return String.format(Locale.US, "خلفية %.1fmm", focal[0]);
+        } catch (Exception ignored) {
+        }
+        return "خلفية";
+    }
+
+    private void setCaptureEnabled(boolean enabled) {
+        if (shutterButton != null) {
+            shutterButton.setEnabled(enabled);
+            shutterButton.setAlpha(enabled ? 1f : 0.45f);
+        }
+    }
+
+    private void setStatus(String message) {
+        if (statusText != null) statusText.setText(message);
+    }
+
+    private void updateLensButton() {
+        if (lensButton == null) return;
+        if (backCameraIds.size() > 1 && !isFrontCamera) {
+            lensButton.setVisibility(View.VISIBLE);
+            lensButton.setText("عدسة " + (backLensIndex + 1) + "/" + backCameraIds.size());
+        } else {
+            lensButton.setVisibility(View.GONE);
+        }
+    }
+
+    private void updateZoomButtons() {
+        if (zoomRow == null) return;
+        zoomRow.removeAllViews();
+        if (camera == null) return;
+        ZoomState state = camera.getCameraInfo().getZoomState().getValue();
+        if (state == null) return;
+        float min = state.getMinZoomRatio();
+        float max = state.getMaxZoomRatio();
+        List<Float> values = new ArrayList<>();
+        if (min <= 0.65f) values.add(0.6f);
+        values.add(1.0f);
+        if (max >= 2.0f) values.add(2.0f);
+        if (max >= 3.0f) values.add(3.0f);
+        for (Float ratio : values) {
+            Button button = pillButton(String.format(Locale.US, "%.1fx", ratio), Math.abs(state.getZoomRatio() - ratio) < 0.15f);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(34));
+            params.leftMargin = dp(4);
+            params.rightMargin = dp(4);
+            zoomRow.addView(button, params);
+            button.setOnClickListener(v -> setZoom(ratio));
+        }
+        if (lensButton == null) {
+            lensButton = new TextView(this);
+            lensButton.setTextColor(Color.rgb(240, 220, 180));
+            lensButton.setTextSize(11);
+            lensButton.setGravity(Gravity.CENTER);
+            lensButton.setPadding(dp(9), 0, dp(9), 0);
+            lensButton.setBackground(roundRect(Color.rgb(31, 37, 47), 20, 1, Color.rgb(70, 76, 85)));
+            lensButton.setClickable(true);
+            lensButton.setOnClickListener(v -> cycleBackLens());
+        }
+        if (backCameraIds.size() > 1 && !isFrontCamera) {
+            lensButton.setVisibility(View.VISIBLE);
+            lensButton.setText("عدسة " + (backLensIndex + 1));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(34));
+            lp.leftMargin = dp(4);
+            lp.rightMargin = dp(4);
+            zoomRow.addView(lensButton, lp);
+        }
+    }
+
+    private void setZoom(float ratio) {
+        if (camera == null) return;
+        try {
+            ZoomState state = camera.getCameraInfo().getZoomState().getValue();
+            if (state == null) return;
+            float bounded = Math.max(state.getMinZoomRatio(), Math.min(state.getMaxZoomRatio(), ratio));
+            camera.getCameraControl().setZoomRatio(bounded);
+            updateZoomButtons();
+        } catch (Exception error) {
+            setStatus("التقريب غير متاح بهذه العدسة.");
+        }
+    }
+
+    private void cycleBackLens() {
+        if (backCameraIds.size() < 2) return;
+        backLensIndex = (backLensIndex + 1) % backCameraIds.size();
+        selectedBackCameraId = backCameraIds.get(backLensIndex);
+        activeMode = MODE_PHOTO;
+        updateModeButtons();
+        startCamera();
+    }
+
+    private void switchCamera() {
+        if (frontCameraIds.isEmpty() || backCameraIds.isEmpty()) {
+            Toast.makeText(this, "لم يتم العثور على الكاميرتين الأمامية والخلفية.", Toast.LENGTH_SHORT).show();
             return;
         }
+        isFrontCamera = !isFrontCamera;
+        activeMode = MODE_PHOTO;
+        manualExposureEnabled = false;
+        updateModeButtons();
+        startCamera();
+    }
 
-        captureButton.setEnabled(false);
-        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
-                .format(new Date());
+    private void cycleFlash() {
+        if (!flashAvailable || imageCapture == null) return;
+        flashMode = (flashMode + 1) % 3;
+        imageCapture.setFlashMode(flashMode == FLASH_AUTO ? ImageCapture.FLASH_MODE_AUTO
+                : flashMode == FLASH_ON ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
+        updateFlashLabel();
+    }
+
+    private void updateFlashLabel() {
+        if (flashButton == null) return;
+        String label = flashMode == FLASH_AUTO ? "⚡ AUTO"
+                : flashMode == FLASH_ON ? "⚡ ON" : "⚡ OFF";
+        flashButton.setText(label);
+    }
+
+    private void focusAt(float x, float y) {
+        if (camera == null || previewView == null) return;
+        try {
+            MeteringPoint point = previewView.getMeteringPointFactory().createPoint(x, y);
+            FocusMeteringAction action = new FocusMeteringAction.Builder(
+                    point, FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
+                    .setAutoCancelDuration(3, TimeUnit.SECONDS).build();
+            camera.getCameraControl().startFocusAndMetering(action);
+            if (focusHint != null) focusHint.setText("تم ضبط التركيز والتعريض");
+        } catch (Exception ignored) {
+            if (focusHint != null) focusHint.setText("التركيز التلقائي يعمل");
+        }
+    }
+
+    private void capturePhoto() {
+        if (imageCapture == null || camera == null) {
+            Toast.makeText(this, "انتظر حتى تجهز الكاميرا.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        setCaptureEnabled(false);
+        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         ContentValues values = new ContentValues();
         values.put(MediaStore.Images.Media.DISPLAY_NAME, "RedmiCamera_" + timestamp + ".jpg");
         values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
         values.put(MediaStore.Images.Media.RELATIVE_PATH,
                 Environment.DIRECTORY_PICTURES + "/RedmiCamera");
 
-        ImageCapture.OutputFileOptions options =
-                new ImageCapture.OutputFileOptions.Builder(
-                        getContentResolver(),
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        values).build();
+        ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(
+                getContentResolver(), MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values).build();
 
         imageCapture.takePicture(options, ContextCompat.getMainExecutor(this),
                 new ImageCapture.OnImageSavedCallback() {
                     @Override
                     public void onImageSaved(ImageCapture.OutputFileResults result) {
-                        captureButton.setEnabled(true);
-                        statusText.setText("تم حفظ الصورة في مجلد Pictures/RedmiCamera.");
+                        lastPhotoUri = result.getSavedUri();
+                        setCaptureEnabled(true);
+                        setStatus("تم حفظ الصورة • Pictures/RedmiCamera");
                         Toast.makeText(MainActivity.this, "تم حفظ الصورة", Toast.LENGTH_SHORT).show();
                     }
 
                     @Override
-                    public void onError(ImageCaptureException exception) {
-                        captureButton.setEnabled(true);
-                        statusText.setText("فشل التصوير: " + safeMessage(exception));
+                    public void onError(ImageCaptureException error) {
+                        setCaptureEnabled(true);
+                        setStatus("فشل التصوير: " + safeMessage(error));
                         Toast.makeText(MainActivity.this, "تعذر التقاط الصورة", Toast.LENGTH_SHORT).show();
                     }
                 });
     }
 
-    private void showDeviceReport() {
-        StringBuilder report = new StringBuilder();
-        report.append("تقرير كاميرات الجهاز\n");
-        report.append("====================\n");
-        report.append("الشركة: ").append(android.os.Build.MANUFACTURER).append('\n');
-        report.append("الطراز: ").append(android.os.Build.MODEL).append('\n');
-        report.append("إصدار Android: ").append(android.os.Build.VERSION.RELEASE)
-                .append(" (API ").append(android.os.Build.VERSION.SDK_INT).append(")\n\n");
-
-        CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+    private void openGallery() {
         try {
-            String[] ids = manager.getCameraIdList();
-            report.append("عدد الكاميرات المكتشفة: ").append(ids.length).append("\n\n");
-            for (String id : ids) {
-                CameraCharacteristics info = manager.getCameraCharacteristics(id);
-                Integer facing = info.get(CameraCharacteristics.LENS_FACING);
-                String direction = facing == null ? "غير معروف"
-                        : facing == CameraCharacteristics.LENS_FACING_BACK ? "خلفية"
-                        : facing == CameraCharacteristics.LENS_FACING_FRONT ? "أمامية" : "خارجية";
-                report.append("الكاميرا ").append(id).append(" — ").append(direction).append('\n');
-                report.append("الفلاش: ").append(Boolean.TRUE.equals(
-                        info.get(CameraCharacteristics.FLASH_INFO_AVAILABLE)) ? "متوفر" : "غير متوفر").append('\n');
-                Float zoom = info.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
-                report.append("أقصى تقريب رقمي: ")
-                        .append(zoom == null ? "غير معلن" : String.format(Locale.US, "%.1fx", zoom))
-                        .append("\n\n");
+            Intent intent;
+            if (lastPhotoUri != null) {
+                intent = new Intent(Intent.ACTION_VIEW);
+                intent.setDataAndType(lastPhotoUri, "image/jpeg");
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } else {
+                intent = new Intent(Intent.ACTION_VIEW);
+                intent.setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*");
             }
-        } catch (Exception exception) {
-            report.append("تعذر قراءة تفاصيل الكاميرا: ").append(safeMessage(exception));
+            startActivity(intent);
+        } catch (Exception error) {
+            try {
+                startActivity(new Intent(Intent.ACTION_GET_CONTENT).setType("image/*"));
+            } catch (Exception ignored) {
+                Toast.makeText(this, "لم يتم العثور على تطبيق للمعرض.", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private void showProSettings() {
+        if (camera == null) {
+            Toast.makeText(this, "الكاميرا لم تجهز بعد.", Toast.LENGTH_SHORT).show();
+            return;
         }
 
-        TextView text = new TextView(this);
-        text.setText(report.toString());
-        text.setTextColor(Color.rgb(235, 237, 242));
-        text.setTextSize(13);
-        text.setPadding(dp(16), dp(14), dp(16), dp(14));
-        text.setTextIsSelectable(true);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(18), dp(8), dp(18), dp(12));
+        panel.setBackgroundColor(Color.rgb(17, 20, 26));
 
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(Color.rgb(20, 23, 29));
-        scroll.addView(text);
+        scroll.addView(panel);
 
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("معلومات الجهاز")
+        TextView intro = settingText("تحكم بالصورة حسب ما تسمح به عدسة الهاتف. بعض الخيارات قد تختفي إذا لم يدعمها تعريف شاومي.", 12, false);
+        panel.addView(intro);
+
+        addSection(panel, "التعريض");
+        android.util.Range<Integer> evRange = camera.getCameraInfo().getExposureState().getExposureCompensationRange();
+        float evStep = camera.getCameraInfo().getExposureState().getExposureCompensationStep().floatValue();
+        int minEv = evRange == null ? 0 : evRange.getLower();
+        int maxEv = evRange == null ? 0 : evRange.getUpper();
+        int currentEv = camera.getCameraInfo().getExposureState().getExposureCompensationIndex();
+        TextView evLabel = settingText("تعويض الإضاءة: " + formatEv(currentEv, evStep), 13, true);
+        panel.addView(evLabel);
+        SeekBar evSeek = new SeekBar(this);
+        evSeek.setMax(Math.max(1, maxEv - minEv));
+        evSeek.setProgress(Math.max(0, Math.min(evSeek.getMax(), currentEv - minEv)));
+        panel.addView(evSeek);
+        evSeek.setOnSeekBarChangeListener(new SimpleSeekListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (!fromUser || camera == null) return;
+                int index = minEv + progress;
+                exposureCompensationIndex = index;
+                camera.getCameraControl().setExposureCompensationIndex(index);
+                evLabel.setText("تعويض الإضاءة: " + formatEv(index, evStep));
+            }
+        });
+
+        addSection(panel, "توازن اللون الأبيض");
+        List<String> wbLabels = new ArrayList<>();
+        List<Integer> wbModes = new ArrayList<>();
+        int[] supportedWb = getSupportedWhiteBalanceModes();
+        for (int mode : supportedWb) {
+            wbModes.add(mode);
+            wbLabels.add(whiteBalanceName(mode));
+        }
+        Spinner wbSpinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, wbLabels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        wbSpinner.setAdapter(adapter);
+        int wbPosition = wbModes.indexOf(whiteBalanceMode);
+        wbSpinner.setSelection(Math.max(0, wbPosition));
+        panel.addView(wbSpinner);
+        wbSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (position < wbModes.size()) {
+                    whiteBalanceMode = wbModes.get(position);
+                    applyManualCameraOptions();
+                }
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+
+        addSection(panel, "التحكم اليدوي");
+        CameraCharacteristics characteristics = getCurrentCharacteristics();
+        boolean manualSupported = isManualExposureSupported(characteristics) && activeMode == MODE_PHOTO && !isFrontCamera;
+        if (manualSupported) {
+            CheckBox manualToggle = new CheckBox(this);
+            manualToggle.setText("تفعيل ISO وسرعة الغالق يدويًا");
+            manualToggle.setTextColor(Color.WHITE);
+            manualToggle.setButtonTintList(android.content.res.ColorStateList.valueOf(Color.rgb(230, 190, 102)));
+            manualToggle.setChecked(manualExposureEnabled);
+            panel.addView(manualToggle);
+
+            android.util.Range<Integer> isoRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+            android.util.Range<Long> timeRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+
+            TextView isoLabel = settingText("ISO: " + manualIso, 13, true);
+            panel.addView(isoLabel);
+            SeekBar isoSeek = new SeekBar(this);
+            isoSeek.setMax(100);
+            int isoMin = isoRange.getLower();
+            int isoMax = isoRange.getUpper();
+            isoSeek.setProgress(toProgress(manualIso, isoMin, isoMax));
+            panel.addView(isoSeek);
+
+            TextView shutterLabel = settingText("سرعة الغالق: " + formatShutter(manualExposureNs), 13, true);
+            panel.addView(shutterLabel);
+            SeekBar shutterSeek = new SeekBar(this);
+            shutterSeek.setMax(100);
+            long timeMin = Math.max(1_000_000L, timeRange.getLower());
+            long timeMax = Math.min(500_000_000L, timeRange.getUpper());
+            shutterSeek.setProgress(toLogProgress(manualExposureNs, timeMin, timeMax));
+            panel.addView(shutterSeek);
+
+            setManualControlsEnabled(manualToggle.isChecked(), isoLabel, isoSeek, shutterLabel, shutterSeek);
+            manualToggle.setOnCheckedChangeListener((button, checked) -> {
+                manualExposureEnabled = checked;
+                setManualControlsEnabled(checked, isoLabel, isoSeek, shutterLabel, shutterSeek);
+                if (checked) {
+                    flashMode = FLASH_OFF;
+                    if (imageCapture != null) imageCapture.setFlashMode(ImageCapture.FLASH_MODE_OFF);
+                    updateFlashLabel();
+                }
+                applyManualCameraOptions();
+            });
+
+            isoSeek.setOnSeekBarChangeListener(new SimpleSeekListener() {
+                @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    if (!fromUser) return;
+                    manualIso = isoMin + Math.round((isoMax - isoMin) * (progress / 100f));
+                    isoLabel.setText("ISO: " + manualIso);
+                    if (manualExposureEnabled) applyManualCameraOptions();
+                }
+            });
+            shutterSeek.setOnSeekBarChangeListener(new SimpleSeekListener() {
+                @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    if (!fromUser) return;
+                    manualExposureNs = fromLogProgress(progress, timeMin, timeMax);
+                    shutterLabel.setText("سرعة الغالق: " + formatShutter(manualExposureNs));
+                    if (manualExposureEnabled) applyManualCameraOptions();
+                }
+            });
+        } else {
+            panel.addView(settingText("ISO والغالق اليدوي غير متاحين من واجهة أندرويد لهذه العدسة. اترك التعريض التلقائي يعمل؛ يمكن تعديل الإضاءة من شريط التعويض أعلاه.", 12, false));
+        }
+
+        addSection(panel, "التركيز");
+        panel.addView(settingText("المس أي نقطة في المعاينة لضبط التركيز والتعريض عليها. عند عدم اللمس يستخدم الهاتف التركيز التلقائي المستمر.", 12, false));
+
+        addSection(panel, "معالجة الصور");
+        panel.addView(settingText("الأوضاع HDR والليل والبورتريه تستخدم معالجة الشركة المصنّعة عند دعمها. في وضع الليل ثبّت الهاتف حتى ينتهي دمج اللقطات.", 12, false));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("إعدادات احترافية")
                 .setView(scroll)
-                .setPositiveButton("إغلاق", (dialog, which) -> dialog.dismiss())
+                .setPositiveButton("تم", (d, which) -> d.dismiss())
+                .setNeutralButton("معلومات العدسات", (d, which) -> showDeviceReport())
+                .create();
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(roundRect(Color.rgb(17, 20, 26), 20, 1, Color.rgb(64, 70, 80)));
+            window.setLayout(Math.min(getResources().getDisplayMetrics().widthPixels - dp(28), dp(470)),
+                    Math.min(getResources().getDisplayMetrics().heightPixels - dp(100), dp(650)));
+        }
+    }
+
+    private abstract class SimpleSeekListener implements SeekBar.OnSeekBarChangeListener {
+        @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+        @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+    }
+
+    private TextView settingText(String text, int size, boolean bold) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextColor(bold ? Color.WHITE : Color.rgb(177, 185, 197));
+        view.setTextSize(size);
+        if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        view.setPadding(0, dp(7), 0, dp(5));
+        return view;
+    }
+
+    private void addSection(LinearLayout panel, String title) {
+        TextView text = settingText(title, 14, true);
+        text.setTextColor(Color.rgb(230, 190, 102));
+        text.setPadding(0, dp(17), 0, dp(4));
+        panel.addView(text);
+    }
+
+    private int[] getSupportedWhiteBalanceModes() {
+        CameraCharacteristics c = getCurrentCharacteristics();
+        int[] modes = c == null ? null : c.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES);
+        if (modes == null || modes.length == 0) return new int[]{AWB_AUTO};
+        List<Integer> values = new ArrayList<>();
+        values.add(AWB_AUTO);
+        for (int mode : modes) if (mode != AWB_AUTO) values.add(mode);
+        int[] result = new int[values.size()];
+        for (int i = 0; i < values.size(); i++) result[i] = values.get(i);
+        return result;
+    }
+
+    private String whiteBalanceName(int mode) {
+        switch (mode) {
+            case CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT: return "ضوء النهار";
+            case CaptureRequest.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT: return "غائم";
+            case CaptureRequest.CONTROL_AWB_MODE_FLUORESCENT: return "فلورسنت";
+            case CaptureRequest.CONTROL_AWB_MODE_INCANDESCENT: return "مصباح دافئ";
+            case CaptureRequest.CONTROL_AWB_MODE_SHADE: return "ظل";
+            case CaptureRequest.CONTROL_AWB_MODE_TWILIGHT: return "غروب";
+            default: return "تلقائي";
+        }
+    }
+
+    private CameraCharacteristics getCurrentCharacteristics() {
+        String id = isFrontCamera ? (frontCameraIds.isEmpty() ? null : frontCameraIds.get(0)) : selectedBackCameraId;
+        if (id == null || cameraManager == null) return null;
+        try { return cameraManager.getCameraCharacteristics(id); }
+        catch (Exception ignored) { return null; }
+    }
+
+    private boolean isManualExposureSupported(CameraCharacteristics c) {
+        if (c == null) return false;
+        int[] ae = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES);
+        android.util.Range<Integer> iso = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        android.util.Range<Long> time = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        if (ae == null || iso == null || time == null) return false;
+        for (int mode : ae) if (mode == CaptureRequest.CONTROL_AE_MODE_OFF) return true;
+        return false;
+    }
+
+    private void setManualControlsEnabled(boolean enabled, TextView isoLabel, SeekBar isoSeek,
+                                          TextView shutterLabel, SeekBar shutterSeek) {
+        isoLabel.setEnabled(enabled);
+        isoSeek.setEnabled(enabled);
+        shutterLabel.setEnabled(enabled);
+        shutterSeek.setEnabled(enabled);
+        float alpha = enabled ? 1f : 0.42f;
+        isoLabel.setAlpha(alpha);
+        isoSeek.setAlpha(alpha);
+        shutterLabel.setAlpha(alpha);
+        shutterSeek.setAlpha(alpha);
+    }
+
+    private int toProgress(int value, int min, int max) {
+        if (max <= min) return 0;
+        return Math.max(0, Math.min(100, Math.round((value - min) * 100f / (max - min))));
+    }
+
+    private int toLogProgress(long value, long min, long max) {
+        if (max <= min || min <= 0) return 0;
+        double p = Math.log(Math.max(min, Math.min(max, value)) / (double) min)
+                / Math.log(max / (double) min);
+        return (int) Math.round(p * 100.0);
+    }
+
+    private long fromLogProgress(int progress, long min, long max) {
+        if (max <= min || min <= 0) return min;
+        double value = min * Math.pow(max / (double) min, progress / 100.0);
+        return Math.max(min, Math.min(max, Math.round(value)));
+    }
+
+    private String formatEv(int index, float step) {
+        return String.format(Locale.US, "%+.1f EV", index * (step <= 0 ? 1f : step));
+    }
+
+    private String formatShutter(long ns) {
+        double seconds = ns / 1_000_000_000.0;
+        if (seconds <= 0) return "تلقائي";
+        if (seconds < 1.0) return "1/" + Math.round(1.0 / seconds) + "s";
+        return String.format(Locale.US, "%.1fs", seconds);
+    }
+
+    private void applyManualCameraOptions() {
+        if (camera == null) return;
+        try {
+            CaptureRequestOptions.Builder builder = new CaptureRequestOptions.Builder();
+            if (manualExposureEnabled && activeMode == MODE_PHOTO && !isFrontCamera) {
+                builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+                builder.setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, manualIso);
+                builder.setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, manualExposureNs);
+            } else {
+                builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            }
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, whiteBalanceMode);
+            Camera2CameraControl.from(camera.getCameraControl()).setCaptureRequestOptions(builder.build());
+        } catch (Exception error) {
+            setStatus("لم يقبل تعريف الكاميرا هذا التحكم اليدوي.");
+        }
+    }
+
+    private void showDeviceReport() {
+        StringBuilder report = new StringBuilder();
+        report.append("تقرير الكاميرات\n");
+        report.append("الهاتف: ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append('\n');
+        report.append("Android ").append(Build.VERSION.RELEASE).append(" • API ").append(Build.VERSION.SDK_INT).append("\n\n");
+
+        try {
+            String[] ids = cameraManager.getCameraIdList();
+            report.append("الأجهزة التي كشفها النظام: ").append(ids.length).append("\n\n");
+            for (String id : ids) {
+                CameraCharacteristics c = cameraManager.getCameraCharacteristics(id);
+                Integer facing = c.get(CameraCharacteristics.LENS_FACING);
+                String direction = facing != null && facing == CameraCharacteristics.LENS_FACING_BACK
+                        ? "خلفية" : facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT
+                        ? "أمامية" : "غير معروف";
+                float[] focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_LENGTHS);
+                report.append("كاميرا ID ").append(id).append(" • ").append(direction).append('\n');
+                if (focal != null) report.append("البعد البؤري: ").append(Arrays.toString(focal)).append(" mm\n");
+                java.util.Set<String> physical = c.getPhysicalCameraIds();
+                if (physical != null && !physical.isEmpty()) {
+                    report.append("مجموعة كاميرات مادية: ").append(physical).append('\n');
+                }
+                int[] caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+                boolean logical = false;
+                if (caps != null) for (int cap : caps) {
+                    if (cap == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA) logical = true;
+                }
+                report.append("دعم دمج كاميرات منطقية: ").append(logical ? "نعم" : "لا").append("\n\n");
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                report.append("التشغيل المتزامن المدعوم: ");
+                report.append(cameraManager.getConcurrentCameraIds().isEmpty() ? "لم يعلن النظام عن أزواج متزامنة" : "يوجد زوج/أزواج مدعومة");
+                report.append('\n');
+            } else {
+                report.append("فحص التشغيل المتزامن يحتاج Android 11 أو أحدث.\n");
+            }
+        } catch (Exception error) {
+            report.append("تعذر قراءة كل بيانات الكاميرا: ").append(safeMessage(error));
+        }
+
+        report.append("\nملاحظة: عدسة العمق لا تلتقط صورة عادية مستقلة. الدمج بين الحساسات يتحكم به تعريف شاومي؛ لا يمكن للتطبيق فرض تشغيل أربع حساسات معًا.");
+
+        TextView text = settingText(report.toString(), 12, false);
+        text.setTextColor(Color.rgb(230, 234, 241));
+        text.setTextIsSelectable(true);
+        text.setPadding(dp(17), dp(10), dp(17), dp(14));
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(Color.rgb(17, 20, 26));
+        scroll.addView(text);
+        new AlertDialog.Builder(this)
+                .setTitle("معلومات العدسات والدمج")
+                .setView(scroll)
+                .setPositiveButton("إغلاق", (d, which) -> d.dismiss())
                 .show();
     }
 
