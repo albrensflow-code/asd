@@ -27,6 +27,7 @@ import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -111,6 +112,8 @@ public class MainActivity extends ComponentActivity {
     private FrameLayout shutterButton;
     private View shutterCore;
     private GridOverlay gridOverlay;
+    private ScaleGestureDetector scaleGestureDetector;
+    private boolean multiTouchGesture = false;
     private LinearLayout zoomRow;
     private LinearLayout modeRow;
 
@@ -124,11 +127,15 @@ public class MainActivity extends ComponentActivity {
     private CameraManager cameraManager;
     private ActivityResultLauncher<String> cameraPermissionLauncher;
     private ActivityResultLauncher<String> audioPermissionLauncher;
+    private ActivityResultLauncher<String> imagePickerLauncher;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService colorWorker = Executors.newSingleThreadExecutor();
     private int timerIndex = 0;
     private final int[] timerValues = {0, 3, 5, 10};
     private boolean countdownActive = false;
+    private Runnable countdownRunnable;
+    private boolean pendingVideoStart = false;
+    private int cameraRequestGeneration = 0;
     private boolean gridEnabled = false;
     private SensorManager sensorManager;
     private Sensor rotationSensor;
@@ -151,6 +158,7 @@ public class MainActivity extends ComponentActivity {
     private boolean isFrontCamera = false;
     private boolean flashAvailable = false;
     private Uri lastPhotoUri;
+    private Uri lastOriginalPhotoUri;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -174,7 +182,18 @@ public class MainActivity extends ComponentActivity {
                 });
         audioPermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(),
-                granted -> beginVideoRecording(granted));
+                granted -> {
+                    pendingVideoStart = false;
+                    beginVideoRecording(granted);
+                });
+        imagePickerLauncher = registerForActivityResult(
+                new ActivityResultContracts.GetContent(), uri -> {
+                    if (uri != null) {
+                        lastOriginalPhotoUri = uri;
+                        lastPhotoUri = uri;
+                        openColorLabForCurrentPhoto();
+                    }
+                });
 
         setContentView(createScreen());
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -218,10 +237,10 @@ public class MainActivity extends ComponentActivity {
         gridButtonParams.leftMargin = dp(3);
         header.addView(gridButton, gridButtonParams);
 
-        flashButton = iconButton("AUTO", 52);
-        flashButton.setTextSize(12);
+        flashButton = iconButton("FLASH", 52);
+        flashButton.setTextSize(10);
         flashButton.setTextColor(Color.rgb(230, 190, 102));
-        flashButton.setOnClickListener(v -> resetAutoMode());
+        flashButton.setOnClickListener(v -> cycleFlash());
         LinearLayout.LayoutParams flashParams = new LinearLayout.LayoutParams(dp(52), dp(44));
         flashParams.leftMargin = dp(3);
         header.addView(flashButton, flashParams);
@@ -269,10 +288,23 @@ public class MainActivity extends ComponentActivity {
         focusParams.bottomMargin = dp(12);
         previewFrame.addView(focusHint, focusParams);
 
-        previewView.setOnTouchListener((view, event) -> {
-            if (event.getAction() == MotionEvent.ACTION_UP) {
-                focusAt(event.getX(), event.getY());
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override public boolean onScale(ScaleGestureDetector detector) {
+                if (camera == null) return false;
+                ZoomState zoomState = camera.getCameraInfo().getZoomState().getValue();
+                if (zoomState == null) return false;
+                setZoom(zoomState.getZoomRatio() * detector.getScaleFactor());
                 return true;
+            }
+        });
+        previewView.setOnTouchListener((view, event) -> {
+            if (event.getPointerCount() > 1) multiTouchGesture = true;
+            scaleGestureDetector.onTouchEvent(event);
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                if (!multiTouchGesture) focusAt(event.getX(), event.getY());
+                multiTouchGesture = false;
+            } else if (event.getAction() == MotionEvent.ACTION_CANCEL) {
+                multiTouchGesture = false;
             }
             return true;
         });
@@ -450,6 +482,7 @@ public class MainActivity extends ComponentActivity {
         modeButtons.add(button);
         button.setOnClickListener(v -> {
             if (activeMode == mode) return;
+            if (!canReconfigureCamera()) return;
             activeMode = mode;
             updateModeButtons();
             startCamera();
@@ -490,19 +523,26 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void startCamera() {
-        if (previewView == null) return;
+        if (previewView == null || isFinishing() || isDestroyed()) return;
+        final int requestGeneration = ++cameraRequestGeneration;
         setCaptureEnabled(false);
         setStatus("جارٍ تشغيل الكاميرا...");
-        if (flashButton != null) flashButton.setText("AUTO");
+        if (flashButton != null) {
+            flashButton.setText("...");
+            flashButton.setEnabled(false);
+            flashButton.setAlpha(0.5f);
+        }
         ListenableFuture<ProcessCameraProvider> providerFuture =
                 ProcessCameraProvider.getInstance(getApplicationContext());
         providerFuture.addListener(() -> {
             try {
+                if (requestGeneration != cameraRequestGeneration || isFinishing() || isDestroyed()) return;
                 cameraProvider = providerFuture.get();
                 if (extensionsManager == null) {
                     ListenableFuture<ExtensionsManager> extensionFuture =
                             ExtensionsManager.getInstanceAsync(getApplicationContext(), cameraProvider);
                     extensionFuture.addListener(() -> {
+                        if (requestGeneration != cameraRequestGeneration || isFinishing() || isDestroyed()) return;
                         try {
                             extensionsManager = extensionFuture.get();
                         } catch (Exception ignored) {
@@ -516,7 +556,10 @@ public class MainActivity extends ComponentActivity {
                     bindCamera();
                 }
             } catch (Exception error) {
-                setStatus("تعذر تهيئة الكاميرا: " + safeMessage(error));
+                if (requestGeneration == cameraRequestGeneration) {
+                    setCaptureEnabled(false);
+                    setStatus("تعذر تهيئة الكاميرا: " + safeMessage(error));
+                }
             }
         }, ContextCompat.getMainExecutor(this));
     }
@@ -570,70 +613,120 @@ public class MainActivity extends ComponentActivity {
 
     private void bindCamera() {
         if (cameraProvider == null || previewView == null) return;
-        try {
-            CameraSelector baseSelector = baseCameraSelector();
-            CameraSelector finalSelector = baseSelector;
 
-            if (!isFrontCamera && activeMode != MODE_PHOTO && activeMode != MODE_VIDEO && extensionsManager != null) {
-                int ext = extensionMode(activeMode);
-                if (extensionsManager.isExtensionAvailable(baseSelector, ext)) {
-                    finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, ext);
-                } else {
+        CameraSelector baseSelector = baseCameraSelector();
+        CameraSelector finalSelector = baseSelector;
+        boolean usingExtension = false;
+        boolean extensionRequested = !isFrontCamera
+                && activeMode != MODE_PHOTO && activeMode != MODE_VIDEO;
+
+        if (extensionRequested) {
+            try {
+                int extension = extensionMode(activeMode);
+                if (extensionsManager == null
+                        || !extensionsManager.isExtensionAvailable(baseSelector, extension)) {
                     activeMode = MODE_PHOTO;
                     updateModeButtons();
-                    Toast.makeText(this, "هذا الوضع غير مدعوم من تعريف الكاميرا؛ رجعنا للوضع العادي.", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this,
+                            "هذا الوضع غير مدعوم على هذه العدسة؛ تم تشغيل التصوير العادي.",
+                            Toast.LENGTH_LONG).show();
+                } else {
+                    finalSelector = extensionsManager.getExtensionEnabledCameraSelector(baseSelector, extension);
+                    usingExtension = true;
                 }
-            } else if (activeMode != MODE_PHOTO && activeMode != MODE_VIDEO) {
+            } catch (Exception extensionError) {
                 activeMode = MODE_PHOTO;
                 updateModeButtons();
+                Toast.makeText(this,
+                        "تعذر تشغيل المعالجة الخاصة؛ سنستخدم الكاميرا العادية.",
+                        Toast.LENGTH_LONG).show();
             }
+        }
 
-            Preview preview = new Preview.Builder().build();
-            preview.setSurfaceProvider(previewView.getSurfaceProvider());
+        Preview preview = new Preview.Builder().build();
+        preview.setSurfaceProvider(previewView.getSurfaceProvider());
+        cameraProvider.unbindAll();
 
+        try {
+            bindCameraUseCases(preview, finalSelector);
+        } catch (Exception primaryError) {
             cameraProvider.unbindAll();
-            if (activeMode == MODE_VIDEO) {
-                CameraInfo info = selectedCameraInfo();
-                Recorder.Builder recorderBuilder = new Recorder.Builder()
-                        .setQualitySelector(QualitySelector.from(Quality.FHD,
-                                FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)));
-                Recorder recorder = recorderBuilder.build();
-                boolean stabilization = false;
-                if (info != null) {
-                    try { stabilization = Recorder.getVideoCapabilities(info).isStabilizationSupported(); }
-                    catch (Exception ignored) { }
-                }
-                videoCapture = new VideoCapture.Builder<>(recorder)
-                        .setVideoStabilizationEnabled(stabilization)
-                        .build();
+            boolean canFallback = usingExtension || activeMode == MODE_VIDEO;
+            if (!canFallback) {
+                camera = null;
                 imageCapture = null;
-                camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, videoCapture);
-            } else {
                 videoCapture = null;
-                imageCapture = new ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                        .setJpegQuality(100)
-                        .build();
-                camera = cameraProvider.bindToLifecycle(this, finalSelector, preview, imageCapture);
+                setCaptureEnabled(false);
+                setStatus("تعذر تشغيل الكاميرا: " + safeMessage(primaryError));
+                return;
             }
 
-            flashAvailable = camera.getCameraInfo().hasFlashUnit() && !isFrontCamera;
-            flashButton.setEnabled(true);
-            flashButton.setAlpha(1f);
-            torchOn = false;
-            updateFlashLabel();
-            exposureCompensationIndex = camera.getCameraInfo().getExposureState()
-                    .getExposureCompensationIndex();
-            setCaptureEnabled(true);
-            updateZoomButtons();
-            updateLensButton();
+            activeMode = MODE_PHOTO;
+            updateModeButtons();
+            try {
+                bindCameraUseCases(preview, baseSelector);
+                Toast.makeText(this,
+                        usingExtension
+                                ? "لم يقبل الهاتف وضع المعالجة؛ تم الرجوع للتصوير العادي."
+                                : "تعذر تشغيل الفيديو بهذه العدسة؛ تم الرجوع لوضع الصورة.",
+                        Toast.LENGTH_LONG).show();
+            } catch (Exception fallbackError) {
+                fallbackError.addSuppressed(primaryError);
+                camera = null;
+                imageCapture = null;
+                videoCapture = null;
+                setCaptureEnabled(false);
+                setStatus("تعذر تشغيل الكاميرا: " + safeMessage(fallbackError));
+                return;
+            }
+        }
 
-            String lens = isFrontCamera ? "أمامية" : describeSelectedLens();
-            setStatus("جاهزة • " + lens + " • " + modeName(activeMode));
-            if (previewBadge != null) previewBadge.setText("AUTO  •  " + modeName(activeMode).toUpperCase(Locale.ROOT));
-        } catch (Exception error) {
-            setCaptureEnabled(false);
-            setStatus("لم تعمل هذه العدسة/الميزة: " + safeMessage(error));
+        flashAvailable = camera.getCameraInfo().hasFlashUnit() && !isFrontCamera;
+        torchOn = false;
+        flashButton.setEnabled(flashAvailable);
+        flashButton.setAlpha(flashAvailable ? 1f : 0.38f);
+        updateFlashLabel();
+        exposureCompensationIndex = camera.getCameraInfo().getExposureState()
+                .getExposureCompensationIndex();
+        setCaptureEnabled(true);
+        updateZoomButtons();
+        updateLensButton();
+
+        String lens = isFrontCamera ? "أمامية" : describeSelectedLens();
+        setStatus("جاهزة • " + lens + " • " + modeName(activeMode));
+        if (previewBadge != null) {
+            previewBadge.setText("AUTO  •  " + modeName(activeMode).toUpperCase(Locale.ROOT));
+        }
+    }
+
+    private void bindCameraUseCases(Preview preview, CameraSelector selector) {
+        preview.setSurfaceProvider(previewView.getSurfaceProvider());
+        if (activeMode == MODE_VIDEO) {
+            CameraInfo info = selectedCameraInfo();
+            Recorder.Builder recorderBuilder = new Recorder.Builder()
+                    .setQualitySelector(QualitySelector.from(Quality.FHD,
+                            FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)));
+            Recorder recorder = recorderBuilder.build();
+            boolean stabilization = false;
+            if (info != null) {
+                try {
+                    stabilization = Recorder.getVideoCapabilities(info).isStabilizationSupported();
+                } catch (Exception ignored) { }
+            }
+            videoCapture = new VideoCapture.Builder<>(recorder)
+                    .setVideoStabilizationEnabled(stabilization)
+                    .build();
+            imageCapture = null;
+            camera = cameraProvider.bindToLifecycle(this, selector, preview, videoCapture);
+        } else {
+            videoCapture = null;
+            imageCapture = new ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .setJpegQuality(96)
+                    .build();
+            imageCapture.setFlashMode(flashMode == FLASH_AUTO ? ImageCapture.FLASH_MODE_AUTO
+                    : flashMode == FLASH_ON ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
+            camera = cameraProvider.bindToLifecycle(this, selector, preview, imageCapture);
         }
     }
 
@@ -730,15 +823,23 @@ public class MainActivity extends ComponentActivity {
             ZoomState state = camera.getCameraInfo().getZoomState().getValue();
             if (state == null) return;
             float bounded = Math.max(state.getMinZoomRatio(), Math.min(state.getMaxZoomRatio(), ratio));
-            camera.getCameraControl().setZoomRatio(bounded);
-            updateZoomButtons();
+            com.google.common.util.concurrent.ListenableFuture<Void> future =
+                    camera.getCameraControl().setZoomRatio(bounded);
+            future.addListener(() -> {
+                try {
+                    future.get();
+                    updateZoomButtons();
+                } catch (Exception error) {
+                    setStatus("لم يقبل الهاتف مستوى التقريب المطلوب.");
+                }
+            }, ContextCompat.getMainExecutor(this));
         } catch (Exception error) {
             setStatus("التقريب غير متاح بهذه العدسة.");
         }
     }
 
     private void cycleBackLens() {
-        if (backCameraIds.size() < 2) return;
+        if (backCameraIds.size() < 2 || !canReconfigureCamera()) return;
         backLensIndex = (backLensIndex + 1) % backCameraIds.size();
         selectedBackCameraId = backCameraIds.get(backLensIndex);
         activeMode = MODE_PHOTO;
@@ -747,6 +848,7 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void switchCamera() {
+        if (!canReconfigureCamera()) return;
         if (frontCameraIds.isEmpty() || backCameraIds.isEmpty()) {
             Toast.makeText(this, "لم يتم العثور على الكاميرتين الأمامية والخلفية.", Toast.LENGTH_SHORT).show();
             return;
@@ -758,13 +860,20 @@ public class MainActivity extends ComponentActivity {
         startCamera();
     }
 
+    private boolean canReconfigureCamera() {
+        if (activeRecording != null || pendingVideoStart) {
+            Toast.makeText(this, "أوقف التسجيل الحالي أولًا قبل تغيير الكاميرا أو الوضع.", Toast.LENGTH_SHORT).show();
+            return false;
+        }
+        if (countdownActive) cancelCountdown();
+        return true;
+    }
+
     private void resetAutoMode() {
-        if (activeRecording != null) {
-            Toast.makeText(this, "أوقف تسجيل الفيديو أولًا.", Toast.LENGTH_SHORT).show();
+        if (activeRecording != null || pendingVideoStart) {
+            Toast.makeText(this, "أوقف التسجيل الحالي أولًا.", Toast.LENGTH_SHORT).show();
             return;
         }
-        boolean needsRebind = activeMode != MODE_PHOTO;
-        activeMode = MODE_PHOTO;
         flashMode = FLASH_AUTO;
         torchOn = false;
         manualExposureEnabled = false;
@@ -784,18 +893,15 @@ public class MainActivity extends ComponentActivity {
             } catch (Exception ignored) { }
         }
         if (imageCapture != null) imageCapture.setFlashMode(ImageCapture.FLASH_MODE_AUTO);
-        flashButton.setText("AUTO");
-        setStatus("AUTO • تركيز وتعريض وألوان تلقائية");
-        Toast.makeText(this, "رجعت كل إعدادات التصوير إلى AUTO", Toast.LENGTH_SHORT).show();
-        if (needsRebind) startCamera();
+        updateFlashLabel();
+        setStatus("تمت إعادة إعدادات التعريض والتركيز وتوازن اللون إلى AUTO • " + modeName(activeMode));
+        Toast.makeText(this, "تمت إعادة الإعدادات إلى AUTO دون تغيير وضع التصوير.", Toast.LENGTH_SHORT).show();
     }
 
     private void cycleFlash() {
         if (!flashAvailable || camera == null) return;
         if (activeMode == MODE_VIDEO) {
-            torchOn = !torchOn;
-            camera.getCameraControl().enableTorch(torchOn);
-            flashButton.setText(torchOn ? "☼ LIGHT ON" : "☼ LIGHT OFF");
+            setTorch(!torchOn);
             return;
         }
         if (imageCapture == null) return;
@@ -805,9 +911,40 @@ public class MainActivity extends ComponentActivity {
         updateFlashLabel();
     }
 
+    private void setTorch(boolean enabled) {
+        if (camera == null || !flashAvailable) return;
+        flashButton.setEnabled(false);
+        com.google.common.util.concurrent.ListenableFuture<Void> future =
+                camera.getCameraControl().enableTorch(enabled);
+        future.addListener(() -> {
+            try {
+                future.get();
+                torchOn = enabled;
+                setStatus(enabled ? "إضاءة الفيديو مفعلة." : "إضاءة الفيديو متوقفة.");
+            } catch (Exception error) {
+                setStatus("تعذر تغيير إضاءة الفلاش/الفيديو على هذه العدسة.");
+            } finally {
+                updateFlashLabel();
+            }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
     private void updateFlashLabel() {
         if (flashButton == null) return;
-        flashButton.setText("AUTO");
+        if (!flashAvailable || camera == null) {
+            flashButton.setText("NO FLASH");
+            flashButton.setEnabled(false);
+            flashButton.setAlpha(0.38f);
+            return;
+        }
+        flashButton.setEnabled(true);
+        flashButton.setAlpha(1f);
+        if (activeMode == MODE_VIDEO) {
+            flashButton.setText(torchOn ? "LIGHT ON" : "LIGHT OFF");
+        } else {
+            flashButton.setText(flashMode == FLASH_AUTO ? "FLASH AUTO"
+                    : flashMode == FLASH_ON ? "FLASH ON" : "FLASH OFF");
+        }
     }
 
 
@@ -818,8 +955,16 @@ public class MainActivity extends ComponentActivity {
             FocusMeteringAction action = new FocusMeteringAction.Builder(
                     point, FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
                     .setAutoCancelDuration(3, TimeUnit.SECONDS).build();
-            camera.getCameraControl().startFocusAndMetering(action);
-            if (focusHint != null) focusHint.setText("تم ضبط التركيز والتعريض");
+            com.google.common.util.concurrent.ListenableFuture<?> future =
+                    camera.getCameraControl().startFocusAndMetering(action);
+            future.addListener(() -> {
+                try {
+                    Object result = future.get();
+                    if (focusHint != null) focusHint.setText("تم ضبط التركيز والتعريض");
+                } catch (Exception error) {
+                    if (focusHint != null) focusHint.setText("لم يستجب التركيز؛ جرّب نقطة أخرى");
+                }
+            }, ContextCompat.getMainExecutor(this));
         } catch (Exception ignored) {
             if (focusHint != null) focusHint.setText("التركيز التلقائي يعمل");
         }
@@ -849,13 +994,20 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void openColorLab() {
-        if (lastPhotoUri == null) {
-            Toast.makeText(this, "التقط صورة أولًا حتى تفتح استوديو الألوان.", Toast.LENGTH_SHORT).show();
+        if (lastOriginalPhotoUri == null && lastPhotoUri == null) {
+            Toast.makeText(this, "اختر صورة من المعرض لفتح استوديو الألوان.", Toast.LENGTH_SHORT).show();
+            imagePickerLauncher.launch("image/*");
             return;
         }
-        PhotoColorLab.show(this, lastPhotoUri, colorWorker, edited -> {
+        openColorLabForCurrentPhoto();
+    }
+
+    private void openColorLabForCurrentPhoto() {
+        Uri source = lastOriginalPhotoUri != null ? lastOriginalPhotoUri : lastPhotoUri;
+        if (source == null) return;
+        PhotoColorLab.show(this, source, colorWorker, edited -> {
             lastPhotoUri = edited;
-            setStatus("تم حفظ نسخة الألوان المعدّلة.");
+            setStatus("تم حفظ نسخة الألوان المعدّلة؛ الصورة الأصلية ما زالت محفوظة.");
         });
     }
 
@@ -876,13 +1028,23 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void runCountdown(int remaining) {
+        if (!countdownActive) return;
         if (remaining <= 0) {
             countdownActive = false;
+            countdownRunnable = null;
             performPhotoCapture();
             return;
         }
         setStatus("التصوير بعد " + remaining + "...");
-        mainHandler.postDelayed(() -> runCountdown(remaining - 1), 1000);
+        countdownRunnable = () -> runCountdown(remaining - 1);
+        mainHandler.postDelayed(countdownRunnable, 1000);
+    }
+
+    private void cancelCountdown() {
+        countdownActive = false;
+        if (countdownRunnable != null) mainHandler.removeCallbacks(countdownRunnable);
+        countdownRunnable = null;
+        if (camera != null && shutterButton != null) setCaptureEnabled(true);
     }
 
     private void performPhotoCapture() {
@@ -903,6 +1065,7 @@ public class MainActivity extends ComponentActivity {
                     @Override
                     public void onImageSaved(ImageCapture.OutputFileResults result) {
                         lastPhotoUri = result.getSavedUri();
+                        lastOriginalPhotoUri = lastPhotoUri;
                         setCaptureEnabled(true);
                         setStatus("تم حفظ الصورة • Pictures/RedmiCamera");
                         Toast.makeText(MainActivity.this, "تم حفظ الصورة", Toast.LENGTH_SHORT).show();
@@ -931,11 +1094,13 @@ public class MainActivity extends ComponentActivity {
                 == PackageManager.PERMISSION_GRANTED) {
             beginVideoRecording(true);
         } else {
+            pendingVideoStart = true;
             audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
         }
     }
 
     private void beginVideoRecording(boolean withAudio) {
+        pendingVideoStart = false;
         if (videoCapture == null) return;
         try {
             String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
@@ -1032,20 +1197,34 @@ public class MainActivity extends ComponentActivity {
         ArrayAdapter<String> flashAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, flashNames);
         flashAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         flashSpinner.setAdapter(flashAdapter);
-        flashSpinner.setSelection(flashMode);
+        boolean videoSettings = activeMode == MODE_VIDEO;
+        flashSpinner.setSelection(videoSettings ? (torchOn ? 1 : 0) : flashMode);
+        flashSpinner.setEnabled(flashAvailable);
         panel.addView(flashSpinner);
         flashSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             private boolean first = true;
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
                 if (first) { first = false; return; }
-                flashMode = position;
-                if (imageCapture != null) {
-                    imageCapture.setFlashMode(position == FLASH_AUTO ? ImageCapture.FLASH_MODE_AUTO
-                            : position == FLASH_ON ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
+                if (videoSettings) {
+                    setTorch(position == 1);
+                } else {
+                    flashMode = position;
+                    if (imageCapture != null) {
+                        imageCapture.setFlashMode(position == FLASH_AUTO ? ImageCapture.FLASH_MODE_AUTO
+                                : position == FLASH_ON ? ImageCapture.FLASH_MODE_ON : ImageCapture.FLASH_MODE_OFF);
+                    }
+                    updateFlashLabel();
                 }
-                updateFlashLabel();
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+        Button resetAutoButton = new Button(this);
+        resetAutoButton.setText("إعادة إعدادات التصوير إلى AUTO");
+        resetAutoButton.setAllCaps(false);
+        panel.addView(resetAutoButton);
+        resetAutoButton.setOnClickListener(v -> {
+            resetAutoMode();
+            flashSpinner.setSelection(videoSettings ? 0 : FLASH_AUTO);
         });
 
         addSection(panel, "التعريض");
@@ -1065,8 +1244,13 @@ public class MainActivity extends ComponentActivity {
                 if (!fromUser || camera == null) return;
                 int index = minEv + progress;
                 exposureCompensationIndex = index;
-                camera.getCameraControl().setExposureCompensationIndex(index);
+                com.google.common.util.concurrent.ListenableFuture<Integer> future =
+                        camera.getCameraControl().setExposureCompensationIndex(index);
                 evLabel.setText("تعويض الإضاءة: " + formatEv(index, evStep));
+                future.addListener(() -> {
+                    try { future.get(); }
+                    catch (Exception error) { setStatus("لم يقبل الهاتف قيمة تعويض الإضاءة هذه."); }
+                }, ContextCompat.getMainExecutor(this));
             }
         });
 
@@ -1373,7 +1557,12 @@ public class MainActivity extends ComponentActivity {
             } else {
                 builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             }
-            Camera2CameraControl.from(camera.getCameraControl()).setCaptureRequestOptions(builder.build());
+            com.google.common.util.concurrent.ListenableFuture<Void> future =
+                    Camera2CameraControl.from(camera.getCameraControl()).setCaptureRequestOptions(builder.build());
+            future.addListener(() -> {
+                try { future.get(); }
+                catch (Exception error) { setStatus("لم يقبل تعريف الكاميرا أحد إعدادات التحكم اليدوي."); }
+            }, ContextCompat.getMainExecutor(this));
         } catch (Exception error) {
             setStatus("لم يقبل تعريف الكاميرا هذا التحكم اليدوي.");
         }
@@ -1468,6 +1657,9 @@ public class MainActivity extends ComponentActivity {
     @Override
     protected void onPause() {
         if (sensorManager != null) sensorManager.unregisterListener(levelListener);
+        if (countdownRunnable != null) mainHandler.removeCallbacks(countdownRunnable);
+        countdownRunnable = null;
+        countdownActive = false;
         if (activeRecording != null) activeRecording.stop();
         super.onPause();
     }
@@ -1519,6 +1711,8 @@ public class MainActivity extends ComponentActivity {
 
     @Override
     protected void onDestroy() {
+        cameraRequestGeneration++;
+        mainHandler.removeCallbacksAndMessages(null);
         if (cameraProvider != null) cameraProvider.unbindAll();
         colorWorker.shutdown();
         super.onDestroy();
