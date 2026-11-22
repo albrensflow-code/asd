@@ -36,7 +36,10 @@ jobs:
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" --install "platform-tools" "platforms;android-37" "build-tools;36.0.0"
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-37.0" "build-tools;36.0.0"
+          if [ -d "$SDK_ROOT/platforms/android-37.0" ] && [ ! -e "$SDK_ROOT/platforms/android-37" ]; then
+            ln -s android-37.0 "$SDK_ROOT/platforms/android-37"
+          fi
 
       - name: Build debug APK
         shell: bash
